@@ -62,10 +62,17 @@ def create_bot() -> ControllerBot:
         webpage_url = None
 
         if force_download:
-            # enqueue the original query and let the player handle download/extraction
+            # For forced-download mode: if the query looks like a URL, pass it
+            # through; otherwise use a yt_dlp search prefix so the downloader
+            # can resolve the correct video during extraction.
             title = f"Requested: {query}"
-            stream_url = query
-            webpage_url = query
+            if query.startswith("http://") or query.startswith("https://"):
+                stream_url = query
+                webpage_url = query
+            else:
+                # let yt_dlp handle searching when we later download
+                stream_url = None
+                webpage_url = f"ytsearch1:{query}"
         else:
             try:
                 stream_url, title, webpage_url = await yt_dlp_get_url(query)
