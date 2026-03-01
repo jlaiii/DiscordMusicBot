@@ -5,134 +5,152 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DiscordMusicBot | High-Performance Audio Streaming</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://unpkg.com/lucide@latest"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
     <style>
-        body { font-family: 'Inter', sans-serif; background-color: #0f172a; color: #f8fafc; }
+        body { font-family: 'Inter', sans-serif; background-color: #0f172a; }
         .glass { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.1); }
         .hero-gradient { background: radial-gradient(circle at top right, #3b82f633, transparent), radial-gradient(circle at bottom left, #8b5cf633, transparent); }
-        .feature-card:hover { transform: translateY(-5px); transition: all 0.3s ease; border-color: #3b82f6; }
-        code { background: #1e293b; padding: 0.2rem 0.4rem; border-radius: 4px; color: #60a5fa; font-size: 0.9em; }
+        .cmd-card:hover { transform: translateY(-2px); transition: all 0.2s; }
     </style>
 </head>
-<body class="hero-gradient min-h-screen">
+<body class="text-slate-200 selection:bg-blue-500/30">
 
-    <nav class="fixed w-full z-50 glass">
-        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div class="flex items-center justify-between h-16">
-                <div class="flex items-center gap-2">
-                    <i class="fas fa-compact-disc text-blue-500 text-2xl animate-spin-slow"></i>
-                    <span class="font-bold text-xl tracking-tight">DiscordMusicBot</span>
-                </div>
-                <div class="hidden md:block">
-                    <div class="ml-10 flex items-baseline space-x-8 text-gray-300">
-                        <a href="#features" class="hover:text-white transition">Features</a>
-                        <a href="#setup" class="hover:text-white transition">Setup</a>
-                        <a href="https://github.com/jlaiii/DiscordMusicBot" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition flex items-center gap-2">
-                            <i class="fab fa-github"></i> View Source
-                        </a>
-                    </div>
-                </div>
+    <nav class="fixed w-full z-50 glass border-b border-white/5">
+        <div class="max-w-6xl mx-auto px-6 py-4 flex justify-between items-center">
+            <div class="flex items-center gap-2 font-bold text-xl tracking-tight">
+                <i data-lucide="music" class="text-blue-500"></i>
+                <span>DiscordMusicBot</span>
             </div>
+            <div class="hidden md:flex gap-8 text-sm font-medium text-slate-400">
+                <a href="#features" class="hover:text-white transition">Features</a>
+                <a href="#commands" class="hover:text-white transition">Commands</a>
+                <a href="#setup" class="hover:text-white transition">Setup</a>
+            </div>
+            <a href="https://github.com/jlaiii/DiscordMusicBot" class="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2 rounded-full text-sm font-semibold transition flex items-center gap-2">
+                <i data-lucide="github" class="w-4 h-4"></i> GitHub
+            </a>
         </div>
     </nav>
 
-    <header class="pt-32 pb-16 px-4">
-        <div class="max-w-5xl mx-auto text-center">
-            <h1 class="text-5xl md:text-7xl font-extrabold mb-6 bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-violet-500">
-                Stream Seamlessly.
+    <section class="relative pt-32 pb-20 px-6 hero-gradient">
+        <div class="max-w-4xl mx-auto text-center">
+            <h1 class="text-5xl md:text-7xl font-extrabold text-white mb-6 tracking-tight">
+                Crystal Clear Audio <br><span class="text-blue-500">In Your Server.</span>
             </h1>
-            <p class="text-xl text-gray-400 mb-10 max-w-2xl mx-auto">
-                A professional-grade Discord music bot featuring multi-process downloading, YouTube integration via <code>yt-dlp</code>, and robust FFmpeg streaming.
+            <p class="text-lg text-slate-400 mb-10 max-w-2xl mx-auto">
+                A robust Discord music bot built with Python, featuring hybrid streaming/download logic, multi-process workers, and seamless YouTube integration.
             </p>
-            <div class="flex flex-col sm:flex-row justify-center gap-4">
-                <a href="#setup" class="px-8 py-4 bg-white text-slate-900 font-bold rounded-full hover:bg-gray-200 transition">Get Started</a>
-                <a href="https://github.com/jlaiii/DiscordMusicBot/archive/refs/heads/main.zip" class="px-8 py-4 glass text-white font-bold rounded-full hover:bg-white/10 transition">Download .zip</a>
+            <div class="flex flex-wrap justify-center gap-4">
+                <code class="bg-slate-800 px-4 py-3 rounded-lg border border-slate-700 text-blue-400 font-mono text-sm">
+                    git clone https://github.com/jlaiii/DiscordMusicBot.git
+                </code>
             </div>
         </div>
-    </header>
+    </section>
 
-    <section id="features" class="py-20 px-4">
-        <div class="max-w-7xl mx-auto">
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
-                <div class="feature-card p-8 rounded-2xl glass transition border border-white/5">
-                    <div class="w-12 h-12 bg-blue-500/20 rounded-lg flex items-center justify-center mb-6 text-blue-400">
-                        <i class="fas fa-bolt text-2xl"></i>
-                    </div>
-                    <h3 class="text-xl font-bold mb-3">High Performance</h3>
-                    <p class="text-gray-400">Utilizes <code>multiprocessing</code> for background downloads, ensuring zero lag in command responsiveness.</p>
+    <section id="features" class="py-20 px-6 max-w-6xl mx-auto">
+        <div class="grid md:grid-cols-3 gap-8">
+            <div class="glass p-8 rounded-2xl">
+                <div class="w-12 h-12 bg-blue-500/10 rounded-lg flex items-center justify-center mb-6">
+                    <i data-lucide="zap" class="text-blue-500"></i>
                 </div>
-                <div class="feature-card p-8 rounded-2xl glass transition border border-white/5">
-                    <div class="w-12 h-12 bg-violet-500/20 rounded-lg flex items-center justify-center mb-6 text-violet-400">
-                        <i class="fas fa-shield-alt text-2xl"></i>
-                    </div>
-                    <h3 class="text-xl font-bold mb-3">Self-Healing</h3>
-                    <p class="text-gray-400">Automatic system dependency checks for <code>ffmpeg</code> and <code>deno</code>. Ready for Pterodactyl and Docker.</p>
+                <h3 class="text-xl font-bold mb-3">Hybrid Playback</h3>
+                <p class="text-slate-400 leading-relaxed">Smart fallback logic that switches between direct streaming and local downloads to ensure 100% uptime even with restrictive APIs.</p>
+            </div>
+            <div class="glass p-8 rounded-2xl">
+                <div class="w-12 h-12 bg-purple-500/10 rounded-lg flex items-center justify-center mb-6">
+                    <i data-lucide="cpu" class="text-purple-500"></i>
                 </div>
-                <div class="feature-card p-8 rounded-2xl glass transition border border-white/5">
-                    <div class="w-12 h-12 bg-emerald-500/20 rounded-lg flex items-center justify-center mb-6 text-emerald-400">
-                        <i class="fas fa-stream text-2xl"></i>
+                <h3 class="text-xl font-bold mb-3">Multi-Process Worker</h3>
+                <p class="text-slate-400 leading-relaxed">Utilizes a dedicated background worker process for downloads, keeping the main bot responsive and lag-free.</p>
+            </div>
+            <div class="glass p-8 rounded-2xl">
+                <div class="w-12 h-12 bg-emerald-500/10 rounded-lg flex items-center justify-center mb-6">
+                    <i data-lucide="shield-check" class="text-emerald-500"></i>
+                </div>
+                <h3 class="text-xl font-bold mb-3">Auto-Dependency</h3>
+                <p class="text-slate-400 leading-relaxed">Integrated bootstrap script that automatically handles <code>venv</code>, <code>ffmpeg</code>, and <code>deno</code> installation.</p>
+            </div>
+        </div>
+    </section>
+
+    <section id="commands" class="py-20 px-6 bg-slate-900/50">
+        <div class="max-w-4xl mx-auto">
+            <div class="text-center mb-12">
+                <h2 class="text-3xl font-bold text-white mb-4">Command Reference</h2>
+                <p class="text-slate-400">Prefix: <span class="text-blue-500 font-mono font-bold">!</span></p>
+            </div>
+            <div class="grid gap-4">
+                <div class="glass p-4 rounded-xl flex items-center justify-between cmd-card">
+                    <div>
+                        <span class="text-blue-400 font-mono font-bold">!play &lt;query&gt;</span>
+                        <p class="text-sm text-slate-400 mt-1">Plays audio from a URL or YouTube search.</p>
                     </div>
-                    <h3 class="text-xl font-bold mb-3">Smart Streaming</h3>
-                    <p class="text-gray-400">Intelligent fallback logic: tries direct streaming first, with automatic local download if extraction fails.</p>
+                    <i data-lucide="play-circle" class="text-slate-600"></i>
+                </div>
+                <div class="glass p-4 rounded-xl flex items-center justify-between cmd-card">
+                    <div>
+                        <span class="text-blue-400 font-mono font-bold">!skip / !next</span>
+                        <p class="text-sm text-slate-400 mt-1">Skips the current track in the queue.</p>
+                    </div>
+                    <i data-lucide="skip-forward" class="text-slate-600"></i>
+                </div>
+                <div class="glass p-4 rounded-xl flex items-center justify-between cmd-card">
+                    <div>
+                        <span class="text-blue-400 font-mono font-bold">!queue</span>
+                        <p class="text-sm text-slate-400 mt-1">Displays all upcoming tracks.</p>
+                    </div>
+                    <i data-lucide="list-music" class="text-slate-600"></i>
+                </div>
+                <div class="glass p-4 rounded-xl flex items-center justify-between cmd-card">
+                    <div>
+                        <span class="text-blue-400 font-mono font-bold">!pause / !resume</span>
+                        <p class="text-sm text-slate-400 mt-1">Toggles playback state.</p>
+                    </div>
+                    <i data-lucide="pause-circle" class="text-slate-600"></i>
+                </div>
+                <div class="glass p-4 rounded-xl flex items-center justify-between cmd-card">
+                    <div>
+                        <span class="text-blue-400 font-mono font-bold">!stop</span>
+                        <p class="text-sm text-slate-400 mt-1">Clears the queue and disconnects the bot.</p>
+                    </div>
+                    <i data-lucide="stop-circle" class="text-slate-600"></i>
                 </div>
             </div>
         </div>
     </section>
 
-    <section id="setup" class="py-20 bg-slate-900/50">
-        <div class="max-w-4xl mx-auto px-4">
-            <h2 class="text-3xl font-bold mb-12 text-center">Quick Installation</h2>
-            
-            <div class="space-y-6">
-                <div class="glass p-6 rounded-xl">
-                    <h4 class="text-blue-400 font-semibold mb-2">1. Clone & Configure</h4>
-                    <div class="bg-black/40 p-4 rounded-lg font-mono text-sm overflow-x-auto">
-                        <p class="text-gray-500"># Clone the repository</p>
-                        <p>git clone https://github.com/jlaiii/DiscordMusicBot.git</p>
-                        <p class="mt-2 text-gray-500"># Navigate to directory</p>
-                        <p>cd DiscordMusicBot</p>
-                    </div>
+    <section id="setup" class="py-20 px-6 max-w-4xl mx-auto">
+        <h2 class="text-3xl font-bold text-white mb-8 text-center">Quick Setup</h2>
+        <div class="space-y-6">
+            <div class="flex gap-6">
+                <div class="flex-none w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center font-bold text-sm">1</div>
+                <div>
+                    <h4 class="text-lg font-semibold mb-2">Configure Token</h4>
+                    <p class="text-slate-400">Create a file named <code>token</code> in the root directory and paste your Discord Bot Token, or set the <code>DISCORD_TOKEN</code> environment variable.</p>
                 </div>
-
-                <div class="glass p-6 rounded-xl">
-                    <h4 class="text-blue-400 font-semibold mb-2">2. Provide Token</h4>
-                    <p class="text-sm text-gray-400 mb-3">Create a file named <code>token</code> in the root directory and paste your Discord Bot Token inside.</p>
-                </div>
-
-                <div class="glass p-6 rounded-xl">
-                    <h4 class="text-blue-400 font-semibold mb-2">3. Run the Automator</h4>
-                    <p class="text-sm text-gray-400 mb-3">The <code>start.py</code> script handles venv creation, dependency installation, and system path setup.</p>
-                    <div class="bg-black/40 p-4 rounded-lg font-mono text-sm">
-                        <p>python3 start.py</p>
-                    </div>
+            </div>
+            <div class="flex gap-6">
+                <div class="flex-none w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center font-bold text-sm">2</div>
+                <div>
+                    <h4 class="text-lg font-semibold mb-2">Run the Bootstrap</h4>
+                    <p class="text-slate-400 mb-4">Execute the start script. It will automatically create a virtual environment and install dependencies like <code>ffmpeg</code> and <code>yt-dlp</code>.</p>
+                    <code class="bg-black/40 p-3 rounded block text-emerald-400 font-mono text-sm">python start.py</code>
                 </div>
             </div>
         </div>
     </section>
 
     <footer class="py-12 border-t border-white/5 text-center">
-        <div class="max-w-7xl mx-auto px-4">
-            <p class="text-gray-500 text-sm">
-                Built with <code>discord.py</code> and <code>yt-dlp</code>. <br>
-                Released under the MIT License.
-            </p>
-            <div class="mt-6 flex justify-center gap-6 text-gray-400">
-                <a href="https://github.com/jlaiii/DiscordMusicBot" class="hover:text-white transition"><i class="fab fa-github text-xl"></i></a>
-            </div>
+        <p class="text-slate-500 text-sm mb-4">Built with Discord.py and yt-dlp</p>
+        <div class="flex justify-center gap-6">
+            <a href="https://github.com/jlaiii/DiscordMusicBot" class="text-slate-400 hover:text-white transition"><i data-lucide="github"></i></a>
         </div>
     </footer>
 
     <script>
-        // Smooth scrolling
-        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
-            anchor.addEventListener('click', function (e) {
-                e.preventDefault();
-                document.querySelector(this.getAttribute('href')).scrollIntoView({
-                    behavior: 'smooth'
-                });
-            });
-        });
+        lucide.createIcons();
     </script>
 </body>
 </html>
