@@ -26,7 +26,8 @@ class ControllerBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
-        super().__init__(command_prefix=PREFIX, intents=intents)
+        # Disable the default help command so we can register a custom one
+        super().__init__(command_prefix=PREFIX, intents=intents, help_command=None)
         self.players: dict[int, MusicPlayer] = {}
         self.manager = Manager()
         self.task_queue = self.manager.Queue()
