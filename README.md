@@ -1,70 +1,77 @@
-# DMusicBot
+# DiscordMusicBot
 
-A lightweight Discord music bot for playing audio in voice channels.
+A lightweight Discord music bot that uses `yt-dlp` for downloads/streaming and a separate worker process for downloads. Includes helper tooling (`start.py`) to create a virtualenv, install dependencies and launch the bot.
 
-**Contents**
-- **Features:** queue, play from URL/search, pause/resume, skip, stop, now playing, volume
-- **Files:** core bot logic in [bot.py](bot.py) and audio logic in [player.py](player.py)
+**Features**
+- Play audio in voice channels via `!play <query>` (supports URLs and search queries)
+- Queue management: `!queue`, `!skip`, `!stop`, `!pause`, `!resume`
+- Autoplay seed buffer and simple autoplay toggle
+- Worker process for downloads to avoid blocking the main bot
 
-## Requirements
-- Python 3.10+
-- See [requirements.txt](requirements.txt) for exact dependencies
+**Requirements**
+- Python 3.10+ (project code uses modern typing features)
+- System dependencies: `ffmpeg` (required for playback). `deno` is optional but recommended for some `yt-dlp` extraction cases.
+- Python packages (see `requirements.txt`):
 
-## Installation
-1. Clone the repository.
-2. Install dependencies:
-
-```powershell
-python -m pip install -r requirements.txt
+```
+discord.py[voice]==2.6.4
+PyNaCl==1.5.0
+yt-dlp
+pytest==7.4.0
 ```
 
-## Configuration
-- The bot reads the Discord token from the `token` file in the repo root. Alternatively set the environment variable `DISCORD_TOKEN`.
+**Quickstart (Local development)**
 
-Create a `token` file containing only your bot token or run:
+1. Clone the repo and change into the project directory.
 
-```powershell
-$env:DISCORD_TOKEN = 'YOUR_TOKEN_HERE'
-```
+2. Provide your bot token either by creating a file named `token` with the token on a single line, or set the `DISCORD_TOKEN` environment variable.
 
-## Running
-- Start the bot with:
+3. Create a virtual environment, install dependencies and run the bot using the included helper:
 
-```powershell
+```bash
 python start.py
 ```
 
-If needed you can run `bot.py` directly:
+`start.py` will:
+- create and use a `.venv` virtual environment if one does not exist
+- attempt to install Python dependencies from `requirements.txt`
+- try to auto-install system deps like `ffmpeg`/`deno` in supported container environments (best-effort)
 
-```powershell
+Alternatively, to run directly after installing requirements manually:
+
+```bash
+python -m pip install -r requirements.txt
+# then either
 python bot.py
+# or run via the helper to use the venv: python start.py
 ```
 
-## Common Commands
-Usage depends on your server prefix (common examples below assume `!`). Typical commands implemented by this bot:
+**Token & environment variables**
+- `DISCORD_TOKEN` — Discord bot token (preferred) or create a `token` file in the project root containing the token.
+- `DMBOT_FORCE_DOWNLOAD=1` — when set, forces download-based playback instead of attempting to stream; helpful in restricted/container environments. `start.py` sets this automatically for container runs.
 
-- `play <url or search>` : Add track to queue / start playback
-- `pause` : Pause current track
-- `resume` : Resume playback
-- `skip` : Skip current track
-- `stop` : Stop playback and clear queue
-- `queue` : Show queued tracks
-- `nowplaying` : Show current track info
-- `join` / `leave` : Bot joins or leaves voice channel
-- `volume <0-100>` : Set playback volume
+**Common commands (in Discord)**
+- `!play <query>` — Play or queue a song (URL or search term)
+- `!skip` / `!next` — Skip current track
+- `!queue` — Show queue
+- `!pause`, `!resume`, `!stop` — Playback controls
+- `!autoplay [genre]` — Toggle or enable autoplay with optional genre
+- `!help` — Sends `HELP.txt` contents if available
 
-Check the command implementation in [bot.py](bot.py) for exact names and behaviour.
+**Notes & troubleshooting**
+- Ensure `ffmpeg` is installed and available on `PATH` — playback will fail without it.
+- If `yt-dlp` extraction raises EJS/JS-related warnings, installing `deno` or Node/EJS may help; otherwise use `DMBOT_FORCE_DOWNLOAD=1`.
+- On Windows, installing `ffmpeg` is typically done via a package manager (scoop/choco) or by adding the static binary to your PATH.
 
-## Development
-- Code lives in `bot.py`, `player.py`, and `worker.py`.
-- Tests: see `test_extract.py` for example tests.
+**Development & tests**
+- Tests (if present) can be run with `pytest`:
 
-## Troubleshooting
-- If audio doesn't play, check that FFmpeg/avconv is installed and available in PATH.
-- Ensure the bot has `CONNECT` and `SPEAK` permissions in Discord voice channels.
+```bash
+pytest
+```
 
-## Contributing
-PRs and issues welcome. Keep changes focused and include tests where appropriate.
+**License**
+This repository does not include a license file. Add one if you plan to publish the project.
 
-## License
-MIT — see LICENSE if included, otherwise consider this project permissively licensed.
+---
+If you'd like, I can also add a sample `dockerfile` or GitHub Actions workflow to build and run the bot in a container or CI environment.

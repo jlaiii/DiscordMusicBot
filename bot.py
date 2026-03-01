@@ -199,6 +199,21 @@ def create_bot() -> ControllerBot:
     async def volume(ctx: commands.Context, vol: int):
         await ctx.send("Volume control is not implemented in this simple demo.")
 
+    async def help_cmd(ctx: commands.Context):
+        """Send a HELP.txt file describing bot commands."""
+        help_path = os.path.join(os.path.dirname(__file__), "HELP.txt")
+        if os.path.exists(help_path):
+            try:
+                await ctx.send(file=discord.File(help_path))
+                return
+            except Exception:
+                pass
+        # fallback: send short inline help
+        help_text = (
+            "Commands: !play <query>, !skip, !autoplay [genre], !pause, !resume, !stop, !queue, !help"
+        )
+        await ctx.send(help_text)
+
     async def autoplay_cmd(ctx: commands.Context, *, genre: Optional[str] = None):
         player = bot.get_player(ctx.guild)
         if genre:
@@ -242,21 +257,6 @@ def create_bot() -> ControllerBot:
                             await ctx.send("Autoplay failed to find a track.")
                 except Exception:
                     await ctx.send("Autoplay failed to find a track.")
-
-            async def help_cmd(ctx: commands.Context):
-                """Send a HELP.txt file describing bot commands."""
-                help_path = os.path.join(os.path.dirname(__file__), "HELP.txt")
-                if os.path.exists(help_path):
-                    try:
-                        await ctx.send(file=discord.File(help_path))
-                        return
-                    except Exception:
-                        pass
-                # fallback: send short inline help
-                help_text = (
-                    "Commands: !play <query>, !skip, !autoplay [genre], !pause, !resume, !stop, !queue, !help"
-                )
-                await ctx.send(help_text)
 
     # register commands
     bot.add_command(commands.Command(play, name="play"))
