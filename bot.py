@@ -81,10 +81,11 @@ def create_bot() -> ControllerBot:
                 return
 
         # debug: show which stream url was selected (best-effort)
-        try:
-            await ctx.send(f"Resolved stream: {stream_url}")
-        except Exception:
-            pass
+        if stream_url:
+            try:
+                await ctx.send(f"Resolved stream: {stream_url}")
+            except Exception:
+                pass
 
         track = Track(title=title or query, source_url=stream_url, webpage_url=webpage_url)
         if player.is_playing():
