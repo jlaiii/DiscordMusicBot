@@ -8,6 +8,7 @@ import shutil
 from multiprocessing import Manager, Process
 
 import discord
+from typing import Optional
 from discord.ext import commands
 
 from player import MusicPlayer, Track, yt_dlp_get_url
@@ -15,6 +16,8 @@ from worker import run_worker
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("dmbot")
+# reduce noisy ffmpeg termination INFO logs from discord internals
+logging.getLogger("discord.player").setLevel(logging.WARNING)
 
 PREFIX = "!"
 
@@ -67,15 +70,22 @@ def create_bot() -> ControllerBot:
             # can resolve the correct video during extraction.
             title = f"Requested: {query}"
             if query.startswith("http://") or query.startswith("https://"):
-                stream_url = query
-                webpage_url = query
+                # probe the URL to detect live streams and a resolved stream URL if possible
+                try:
+                    stream_url, probed_title, webpage_url, is_live = await yt_dlp_get_url(query)
+                    if probed_title:
+                        title = f"Requested: {probed_title}"
+                except Exception:
+                    # probing failed; fall back to passing the URL through
+                    stream_url = query
+                    webpage_url = query
             else:
                 # let yt_dlp handle searching when we later download
                 stream_url = None
                 webpage_url = f"ytsearch1:{query}"
         else:
             try:
-                stream_url, title, webpage_url = await yt_dlp_get_url(query)
+                stream_url, title, webpage_url, is_live = await yt_dlp_get_url(query)
             except Exception as e:
                 await ctx.send(f"Failed to get audio: {e}")
                 return
@@ -87,7 +97,12 @@ def create_bot() -> ControllerBot:
             except Exception:
                 pass
 
-        track = Track(title=title or query, source_url=stream_url, webpage_url=webpage_url)
+        # include is_live flag when known
+        try:
+            is_live_flag = bool(is_live)
+        except Exception:
+            is_live_flag = False
+        track = Track(title=title or query, source_url=stream_url, webpage_url=webpage_url, is_live=is_live_flag)
         if player.is_playing():
             await player.enqueue(track)
             await ctx.send(f"Queued: {track.title}")
@@ -100,8 +115,56 @@ def create_bot() -> ControllerBot:
         if player.voice_client and player.voice_client.is_playing():
             player.voice_client.stop()
             await ctx.send("Skipped.")
+            # try to advance autoplay immediately if enabled
+            if getattr(player, "autoplay", False):
+                async def _advance():
+                    try:
+                        # attempt to reconnect if disconnected and author in voice
+                        if (not player.voice_client or not player.voice_client.is_connected()) and ctx.author.voice and ctx.author.voice.channel:
+                            try:
+                                player.voice_client = await ctx.author.voice.channel.connect()
+                                player.last_voice_channel_id = ctx.author.voice.channel.id
+                            except Exception:
+                                pass
+                        # try using buffer or pick and enqueue
+                        await player.fill_autoplay_buffer(5)
+                        if player.autoplay_buffer:
+                            nt = player.autoplay_buffer.popleft()
+                            await player.enqueue(nt)
+                        else:
+                            nt = await player.pick_autoplay_track(player.last_played)
+                            if nt:
+                                await player.enqueue(nt)
+                    except Exception:
+                        logger.exception("Autoplay advance after skip failed")
+
+                bot.loop.create_task(_advance())
         else:
-            await ctx.send("Nothing is playing.")
+            # nothing is playing; if autoplay is on attempt to start next
+            if getattr(player, "autoplay", False):
+                await ctx.send("Nothing is playing — attempting to resume autoplay.")
+                async def _start():
+                    try:
+                        if (not player.voice_client or not player.voice_client.is_connected()) and ctx.author.voice and ctx.author.voice.channel:
+                            try:
+                                player.voice_client = await ctx.author.voice.channel.connect()
+                                player.last_voice_channel_id = ctx.author.voice.channel.id
+                            except Exception:
+                                pass
+                        await player.fill_autoplay_buffer(5)
+                        if player.autoplay_buffer:
+                            nt = player.autoplay_buffer.popleft()
+                            await player.enqueue(nt)
+                        else:
+                            nt = await player.pick_autoplay_track(player.last_played)
+                            if nt:
+                                await player.enqueue(nt)
+                    except Exception:
+                        logger.exception("Autoplay start from skip/no-play failed")
+
+                bot.loop.create_task(_start())
+            else:
+                await ctx.send("Nothing is playing.")
 
     async def _queue(ctx: commands.Context):
         player = bot.get_player(ctx.guild)
@@ -136,15 +199,76 @@ def create_bot() -> ControllerBot:
     async def volume(ctx: commands.Context, vol: int):
         await ctx.send("Volume control is not implemented in this simple demo.")
 
+    async def autoplay_cmd(ctx: commands.Context, *, genre: Optional[str] = None):
+        player = bot.get_player(ctx.guild)
+        if genre:
+            # set specific genre and enable autoplay
+            player.autoplay_genre = genre.strip().lower()
+            player.autoplay = True
+            await ctx.send(f"Autoplay ON (genre: {player.autoplay_genre})")
+        else:
+            # toggle
+            player.autoplay = not getattr(player, "autoplay", False)
+            status = "ON" if player.autoplay else "OFF"
+            await ctx.send(f"Autoplay {status}")
+
+        # If turned on and bot not connected but the author is in voice, join and start playing
+        if player.autoplay:
+            if (not player.voice_client or not player.voice_client.is_connected()) and ctx.author.voice and ctx.author.voice.channel:
+                try:
+                    channel = ctx.author.voice.channel
+                    player.voice_client = await channel.connect()
+                    player.last_voice_channel_id = channel.id
+                except Exception as e:
+                    await ctx.send(f"Failed to join voice channel: {e}")
+                    return
+
+            # if nothing is playing, enqueue an autoplay seed
+            if not player.is_playing():
+                try:
+                    # attempt to ensure at least one prefetched autoplay track (wait briefly)
+                    ready = await player.ensure_autoplay_ready(min_prefetched=1, timeout=10.0)
+                    if ready and player.autoplay_buffer:
+                        next_track = player.autoplay_buffer.popleft()
+                        await player.enqueue(next_track)
+                        await ctx.send(f"Autoplay started (buffered): {next_track.title}")
+                    else:
+                        # fallback to immediate pick if buffer not ready
+                        next_track = await player.pick_autoplay_track(player.last_played)
+                        if next_track:
+                            await player.enqueue(next_track)
+                            await ctx.send(f"Autoplay started: {next_track.title}")
+                        else:
+                            await ctx.send("Autoplay failed to find a track.")
+                except Exception:
+                    await ctx.send("Autoplay failed to find a track.")
+
+            async def help_cmd(ctx: commands.Context):
+                """Send a HELP.txt file describing bot commands."""
+                help_path = os.path.join(os.path.dirname(__file__), "HELP.txt")
+                if os.path.exists(help_path):
+                    try:
+                        await ctx.send(file=discord.File(help_path))
+                        return
+                    except Exception:
+                        pass
+                # fallback: send short inline help
+                help_text = (
+                    "Commands: !play <query>, !skip, !autoplay [genre], !pause, !resume, !stop, !queue, !help"
+                )
+                await ctx.send(help_text)
+
     # register commands
     bot.add_command(commands.Command(play, name="play"))
     bot.add_command(commands.Command(skip, name="next"))
     bot.add_command(commands.Command(skip, name="skip"))
+    bot.add_command(commands.Command(help_cmd, name="help"))
     bot.add_command(commands.Command(_queue, name="queue"))
     bot.add_command(commands.Command(stop_cmd, name="stop"))
     bot.add_command(commands.Command(pause, name="pause"))
     bot.add_command(commands.Command(resume, name="resume"))
     bot.add_command(commands.Command(volume, name="volume"))
+    bot.add_command(commands.Command(autoplay_cmd, name="autoplay"))
 
     return bot
 
