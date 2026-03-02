@@ -3,152 +3,279 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Discord Music Bot | Seamless High-Fidelity Audio</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <title>Discord Music Bot | High Performance Audio</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
-        body { font-family: 'Inter', sans-serif; background-color: #0f172a; color: #f8fafc; }
-        .hero-gradient { background: radial-gradient(circle at top right, #1e293b, #0f172a); }
-        .glass { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); }
-        .accent-text { background: linear-gradient(90deg, #38bdf8, #818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-        .command-card:hover { border-color: #38bdf8; transform: translateY(-2px); transition: all 0.3s ease; }
+        :root {
+            --primary-color: #5865F2;
+            --secondary-color: #2c2f33;
+            --bg-dark: #0f1011;
+            --text-light: #ffffff;
+            --text-muted: #b9bbbe;
+            --accent: #3ba55d;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-dark);
+            color: var(--text-light);
+            line-height: 1.6;
+            overflow-x: hidden;
+        }
+
+        /* Hero Section */
+        header {
+            height: 80vh;
+            background: linear-gradient(rgba(0,0,0,0.7), rgba(0,0,0,0.7)), url('https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?auto=format&fit=crop&q=80&w=2070') center/cover;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            padding: 0 20px;
+        }
+
+        .hero-title {
+            font-size: 4rem;
+            margin-bottom: 10px;
+            color: var(--primary-color);
+            text-shadow: 2px 2px 10px rgba(0,0,0,0.5);
+        }
+
+        .hero-subtitle {
+            font-size: 1.5rem;
+            color: var(--text-muted);
+            max-width: 700px;
+            margin-bottom: 30px;
+        }
+
+        .btn {
+            padding: 15px 35px;
+            border-radius: 50px;
+            text-decoration: none;
+            font-weight: bold;
+            transition: 0.3s;
+            display: inline-block;
+            margin: 10px;
+        }
+
+        .btn-primary {
+            background-color: var(--primary-color);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background-color: #4752c4;
+            transform: translateY(-2px);
+        }
+
+        /* Features Section */
+        .section {
+            padding: 80px 10%;
+        }
+
+        .section-title {
+            text-align: center;
+            font-size: 2.5rem;
+            margin-bottom: 50px;
+            position: relative;
+        }
+
+        .section-title::after {
+            content: '';
+            width: 50px;
+            height: 4px;
+            background: var(--primary-color);
+            position: absolute;
+            bottom: -10px;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 30px;
+        }
+
+        .feature-card {
+            background: var(--secondary-color);
+            padding: 40px;
+            border-radius: 15px;
+            transition: 0.3s;
+            border: 1px solid #40444b;
+        }
+
+        .feature-card:hover {
+            border-color: var(--primary-color);
+            transform: translateY(-5px);
+        }
+
+        .feature-card i {
+            font-size: 2.5rem;
+            color: var(--primary-color);
+            margin-bottom: 20px;
+        }
+
+        /* Commands Section */
+        .commands-container {
+            background: var(--secondary-color);
+            border-radius: 15px;
+            overflow: hidden;
+        }
+
+        .command-row {
+            padding: 20px;
+            border-bottom: 1px solid #40444b;
+            display: grid;
+            grid-template-columns: 200px 1fr;
+        }
+
+        .command-row:last-child {
+            border-bottom: none;
+        }
+
+        .command-name {
+            color: var(--accent);
+            font-weight: bold;
+            font-family: 'Courier New', Courier, monospace;
+        }
+
+        .command-desc {
+            color: var(--text-muted);
+        }
+
+        /* UI Highlight Section */
+        .ui-showcase {
+            display: flex;
+            align-items: center;
+            gap: 50px;
+            flex-wrap: wrap;
+        }
+
+        .ui-text {
+            flex: 1;
+            min-width: 300px;
+        }
+
+        /* Footer */
+        footer {
+            background: #08090a;
+            padding: 50px 10%;
+            text-align: center;
+            border-top: 1px solid #40444b;
+        }
+
+        .social-links a {
+            color: var(--text-muted);
+            font-size: 1.5rem;
+            margin: 0 15px;
+            transition: 0.3s;
+        }
+
+        .social-links a:hover {
+            color: var(--primary-color);
+        }
+
+        @media (max-width: 768px) {
+            .hero-title { font-size: 2.5rem; }
+            .command-row { grid-template-columns: 1fr; gap: 10px; }
+            .section { padding: 50px 5%; }
+        }
     </style>
 </head>
-<body class="antialiased">
+<body>
 
-    <nav class="sticky top-0 z-50 glass px-6 py-4">
-        <div class="max-w-7xl mx-auto flex justify-between items-center">
-            <div class="flex items-center space-x-2">
-                <i class="fa-solid fa-compact-disc text-3xl text-sky-400 animate-spin-slow"></i>
-                <span class="text-xl font-bold tracking-tight">DMBot</span>
-            </div>
-            <div class="hidden md:flex space-x-8 text-sm font-medium text-slate-300">
-                <a href="#features" class="hover:text-sky-400 transition">Features</a>
-                <a href="#commands" class="hover:text-sky-400 transition">Commands</a>
-                <a href="#setup" class="hover:text-sky-400 transition">Setup</a>
-            </div>
-            <a href="https://github.com/jlaiii/DiscordMusicBot" class="bg-sky-500 hover:bg-sky-400 text-white px-5 py-2 rounded-full text-sm font-semibold transition shadow-lg shadow-sky-500/20">
-                <i class="fa-brands fa-github mr-2"></i>View on GitHub
-            </a>
+    <header>
+        <h1 class="hero-title">High Fidelity Discord Music</h1>
+        <p class="hero-subtitle">A professional-grade Discord music bot with persistent queues, intelligent autoplay, and a modern interactive UI.</p>
+        <div class="actions">
+            <a href="https://github.com/jlaiii/DiscordMusicBot" class="btn btn-primary"><i class="fab fa-github"></i> View on GitHub</a>
         </div>
-    </nav>
-
-    <header class="relative hero-gradient pt-20 pb-32 px-6 overflow-hidden">
-        <div class="max-w-7xl mx-auto text-center relative z-10">
-            <h1 class="text-5xl md:text-7xl font-extrabold mb-6 tracking-tight">
-                High-Performance <br><span class="accent-text">Discord Audio</span>
-            </h1>
-            <p class="text-lg md:text-xl text-slate-400 max-w-2xl mx-auto mb-10 leading-relaxed">
-                A robust Python-based music bot featuring intelligent autoplay, background prefetching, and resilient fallback streaming for the ultimate listening experience.
-            </p>
-            <div class="flex flex-col md:flex-row justify-center gap-4">
-                <a href="#setup" class="bg-white text-slate-900 px-8 py-4 rounded-xl font-bold text-lg hover:bg-slate-100 transition">Get Started</a>
-                <a href="#commands" class="glass px-8 py-4 rounded-xl font-bold text-lg hover:bg-white/10 transition">View Commands</a>
-            </div>
-        </div>
-        <div class="absolute top-0 right-0 w-96 h-96 bg-sky-500/10 rounded-full blur-3xl -mr-48 -mt-48"></div>
-        <div class="absolute bottom-0 left-0 w-96 h-96 bg-indigo-500/10 rounded-full blur-3xl -ml-48 -mb-48"></div>
     </header>
 
-    <section id="features" class="py-24 px-6 max-w-7xl mx-auto">
-        <div class="text-center mb-16">
-            <h2 class="text-3xl md:text-4xl font-bold mb-4">Engineered for Reliability</h2>
-            <p class="text-slate-400">Advanced features that go beyond simple playback.</p>
-        </div>
-        <div class="grid md:grid-cols-3 gap-8">
-            <div class="glass p-8 rounded-2xl">
-                <div class="w-12 h-12 bg-sky-500/20 rounded-lg flex items-center justify-center mb-6 text-sky-400">
-                    <i class="fa-solid fa-bolt text-2xl"></i>
-                </div>
-                <h3 class="text-xl font-bold mb-3">Background Prefetching</h3>
-                <p class="text-slate-400 text-sm leading-relaxed">Automatically downloads the next 6 tracks in the queue to local storage while the current track plays, ensuring zero-latency transitions between songs.</p>
+    <section class="section">
+        <h2 class="section-title">Core Features</h2>
+        <div class="features-grid">
+            <div class="feature-card">
+                <i class="fas fa-bolt"></i>
+                <h3>Low Latency</h3>
+                <p>Optimized FFMPEG streaming ensures minimal buffering and high-quality audio playback.</p>
             </div>
-            <div class="glass p-8 rounded-2xl">
-                <div class="w-12 h-12 bg-indigo-500/20 rounded-lg flex items-center justify-center mb-6 text-indigo-400">
-                    <i class="fa-solid fa-wand-magic-sparkles text-2xl"></i>
-                </div>
-                <h3 class="text-xl font-bold mb-3">Smart Autoplay</h3>
-                <p class="text-slate-400 text-sm leading-relaxed">Keeps the music going with a recommendation engine that picks similar tracks based on your history, genre preferences, and word-overlap analysis.</p>
+            <div class="feature-card">
+                <i class="fas fa-robot"></i>
+                <h3>24/7 Autoplay</h3>
+                <p>Intelligent discovery system with over 50+ genres including Lo-Fi, Jazz, and Tech Podcasts.</p>
             </div>
-            <div class="glass p-8 rounded-2xl">
-                <div class="w-12 h-12 bg-emerald-500/20 rounded-lg flex items-center justify-center mb-6 text-emerald-400">
-                    <i class="fa-solid fa-shield-halved text-2xl"></i>
-                </div>
-                <h3 class="text-xl font-bold mb-3">Hybrid Streaming</h3>
-                <p class="text-slate-400 text-sm leading-relaxed">Dynamically switches between direct FFmpeg network streaming and local file playback based on your environment's capabilities (Deno/FFmpeg).</p>
+            <div class="feature-card">
+                <i class="fas fa-layer-group"></i>
+                <h3>Interactive UI</h3>
+                <p>Modern Discord Buttons and Select Menus for controlling playback, managing playlists, and searching tracks.</p>
+            </div>
+            <div class="feature-card">
+                <i class="fas fa-database"></i>
+                <h3>Playlist Database</h3>
+                <p>Create, save, and manage custom playlists that persist across bot restarts using SQLite.</p>
             </div>
         </div>
     </section>
 
-    <section id="commands" class="py-24 px-6 bg-slate-900/50">
-        <div class="max-w-5xl mx-auto">
-            <div class="flex items-center justify-between mb-12">
-                <h2 class="text-3xl font-bold">Bot Commands</h2>
-                <span class="px-3 py-1 bg-slate-800 rounded-md text-xs font-mono text-sky-400">Prefix: !</span>
+    <section class="section" style="background-color: #1a1c1e;">
+        <div class="ui-showcase">
+            <div class="ui-text">
+                <h2 style="font-size: 2.5rem; margin-bottom: 20px;">Modern Interactions</h2>
+                <p style="color: var(--text-muted); margin-bottom: 20px;">Forget typing long commands. Control your music with a single click using the built-in Main Menu View.</p>
+                <ul style="list-style: none; color: var(--text-muted);">
+                    <li style="margin-bottom: 10px;"><i class="fas fa-check-circle" style="color: var(--accent);"></i> Persistent Button Controllers</li>
+                    <li style="margin-bottom: 10px;"><i class="fas fa-check-circle" style="color: var(--accent);"></i> Modal Search Input</li>
+                    <li style="margin-bottom: 10px;"><i class="fas fa-check-circle" style="color: var(--accent);"></i> Dynamic Genre Selection</li>
+                </ul>
             </div>
-            <div class="grid md:grid-cols-2 gap-4">
-                <div class="command-card glass p-6 rounded-xl flex items-start space-x-4">
-                    <code class="text-sky-400 font-bold whitespace-nowrap">!play &lt;query&gt;</code>
-                    <p class="text-slate-400 text-sm">Searches YouTube or plays a direct link. Supports livestream detection.</p>
-                </div>
-                <div class="command-card glass p-6 rounded-xl flex items-start space-x-4">
-                    <code class="text-sky-400 font-bold whitespace-nowrap">!autoplay [genre]</code>
-                    <p class="text-slate-400 text-sm">Toggles smart autoplay. Optionally specify a genre like 'lofi' or 'rock'.</p>
-                </div>
-                <div class="command-card glass p-6 rounded-xl flex items-start space-x-4">
-                    <code class="text-sky-400 font-bold whitespace-nowrap">!skip / !next</code>
-                    <p class="text-slate-400 text-sm">Skips the current track and triggers the next buffered song.</p>
-                </div>
-                <div class="command-card glass p-6 rounded-xl flex items-start space-x-4">
-                    <code class="text-sky-400 font-bold whitespace-nowrap">!queue</code>
-                    <p class="text-slate-400 text-sm">Displays the list of upcoming tracks currently in the buffer.</p>
-                </div>
-                <div class="command-card glass p-6 rounded-xl flex items-start space-x-4">
-                    <code class="text-sky-400 font-bold whitespace-nowrap">!pause / !resume</code>
-                    <p class="text-slate-400 text-sm">Control playback state without clearing the queue.</p>
-                </div>
-                <div class="command-card glass p-6 rounded-xl flex items-start space-x-4">
-                    <code class="text-sky-400 font-bold whitespace-nowrap">!stop</code>
-                    <p class="text-slate-400 text-sm">Disconnects the bot and clears all queue data and buffers.</p>
+            <div style="flex: 1; text-align: center;">
+                <div style="background: var(--secondary-color); padding: 30px; border-radius: 10px; display: inline-block; border: 1px solid var(--primary-color);">
+                    <div style="background: #36393f; padding: 10px 20px; border-radius: 5px; margin-bottom: 10px;">Play / Pause</div>
+                    <div style="background: #36393f; padding: 10px 20px; border-radius: 5px; margin-bottom: 10px;">Skip</div>
+                    <div style="background: #d83c3e; padding: 10px 20px; border-radius: 5px; margin-bottom: 10px;">Stop</div>
+                    <p style="font-size: 0.8rem; margin-top: 10px; opacity: 0.6;">Interactive Bot Controls</p>
                 </div>
             </div>
         </div>
     </section>
 
-    <section id="setup" class="py-24 px-6 max-w-4xl mx-auto text-center">
-        <h2 class="text-3xl font-bold mb-12">Quick Deployment</h2>
-        <div class="text-left space-y-6">
-            <div class="bg-black/40 rounded-2xl p-8 font-mono text-sm border border-slate-700">
-                <p class="text-slate-500 mb-2"># 1. Clone the repository</p>
-                <p class="text-slate-300 mb-4">git clone https://github.com/jlaiii/DiscordMusicBot.git</p>
-                
-                <p class="text-slate-500 mb-2"># 2. Add your token to a 'token' file or set env</p>
-                <p class="text-slate-300 mb-4">echo "YOUR_DISCORD_TOKEN" > token</p>
-                
-                <p class="text-slate-500 mb-2"># 3. Run the installer and bot</p>
-                <p class="text-slate-300">python start.py</p>
+    <section class="section">
+        <h2 class="section-title">Bot Commands</h2>
+        <p style="text-align: center; margin-bottom: 40px; color: var(--text-muted);">Use the prefix <strong>!</strong> before every command.</p>
+        <div class="commands-container">
+            <div class="command-row">
+                <div class="command-name">!play [query]</div>
+                <div class="command-desc">Connects to your voice channel and plays audio from a search query or URL.</div>
             </div>
-            <div class="grid md:grid-cols-2 gap-6 mt-8">
-                <div class="p-4 border border-slate-800 rounded-lg">
-                    <h4 class="font-bold mb-2"><i class="fa-solid fa-server mr-2 text-slate-400"></i>Self-Healing</h4>
-                    <p class="text-slate-400 text-xs">The <code class="text-slate-300">start.py</code> script automatically detects your OS, creates a venv, and installs ffmpeg/deno if missing.</p>
-                </div>
-                <div class="p-4 border border-slate-800 rounded-lg">
-                    <h4 class="font-bold mb-2"><i class="fa-solid fa-database mr-2 text-slate-400"></i>Persistent History</h4>
-                    <p class="text-slate-400 text-xs">History is saved to <code class="text-slate-300">autoplay_history.json</code> per-guild to ensure you don't hear the same songs every session.</p>
-                </div>
+            <div class="command-row">
+                <div class="command-name">!skip</div>
+                <div class="command-desc">Skips the currently playing track and advances the queue or autoplay.</div>
+            </div>
+            <div class="command-row">
+                <div class="command-name">!menu</div>
+                <div class="command-desc">Displays the interactive control menu for Play/Pause, Stop, and Playlist management.</div>
+            </div>
+            <div class="command-row">
+                <div class="command-name">!player</div>
+                <div class="command-desc">Alias for the main menu, providing full control over the current session.</div>
             </div>
         </div>
     </section>
 
-    <footer class="py-12 border-t border-slate-800 text-center text-slate-500 text-sm">
-        <p>© 2024 DiscordMusicBot Project. Built with Discord.py, yt-dlp, and FFmpeg.</p>
-        <div class="flex justify-center space-x-6 mt-4">
-            <a href="https://github.com/jlaiii/DiscordMusicBot" class="hover:text-white transition">Source Code</a>
-            <a href="#" class="hover:text-white transition">Documentation</a>
-            <a href="#" class="hover:text-white transition">Support</a>
+    <footer>
+        <div class="social-links">
+            <a href="https://github.com/jlaiii/DiscordMusicBot"><i class="fab fa-github"></i></a>
         </div>
+        <p style="margin-top: 20px; color: var(--text-muted);">&copy; 2024 Discord Music Bot Project. Built for performance.</p>
     </footer>
 
 </body>
