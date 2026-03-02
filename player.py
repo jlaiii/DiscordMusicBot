@@ -22,6 +22,10 @@ from worker import download_to_file
 FFMPEG_BEFORE_OPTS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 FFMPEG_OPTIONS = "-vn"
 
+# download timeout and retry configuration (seconds)
+DOWNLOAD_TIMEOUT = int(os.environ.get("DMBOT_DOWNLOAD_TIMEOUT", "120"))
+DOWNLOAD_RETRIES = int(os.environ.get("DMBOT_DOWNLOAD_RETRIES", "2"))
+
 # persistent autoplay history
 HISTORY_FILE = os.environ.get("DMBOT_AUTOPLAY_HISTORY_FILE", "autoplay_history.json")
 HISTORY_MAXLEN = int(os.environ.get("DMBOT_AUTOPLAY_HISTORY_MAXLEN", "512"))
@@ -31,7 +35,7 @@ FAILED_QUERIES_FILE = os.environ.get("DMBOT_AUTOPLAY_FAILED_FILE", "autoplay_fai
 logger = logging.getLogger(__name__)
 
 
-async def yt_dlp_get_url(query: str, max_results: int = 1, exclude_webpage: str | None = None) -> tuple[str, str, str, bool]:
+async def yt_dlp_get_url(query: str, max_results: int = 1, exclude_webpage: str | None = None) -> tuple[str, str, str, bool, float | None]:
     """Return (direct_audio_url, title) for a YouTube link or search query using yt_dlp Python API.
 
     This runs the blocking `yt_dlp.YoutubeDL.extract_info` inside a thread to avoid
@@ -55,7 +59,19 @@ async def yt_dlp_get_url(query: str, max_results: int = 1, exclude_webpage: str 
     def extract():
         import shutil as _sh
         has_deno = bool(_sh.which("deno"))
+        # Allow providing cookies to handle age-restricted / signed-in-only videos.
+        # Set DMBOT_YT_COOKIES to a cookies.txt file exported from your browser,
+        # or DMBOT_YT_COOKIES_FROM_BROWSER to a browser name (e.g. 'chrome') to use
+        # yt-dlp's cookies-from-browser extractor.
         ydl_opts = {"format": "bestaudio/best", "quiet": True, "no_warnings": True}
+        # prefer explicit cookiefile path if provided
+        cookiefile = os.environ.get("DMBOT_YT_COOKIES")
+        cookies_from_browser = os.environ.get("DMBOT_YT_COOKIES_FROM_BROWSER")
+        if cookiefile:
+            ydl_opts["cookiefile"] = cookiefile
+        elif cookies_from_browser:
+            # yt-dlp option key is 'cookiesfrombrowser'
+            ydl_opts["cookiesfrombrowser"] = cookies_from_browser
         if has_deno:
             ydl_opts["jsruntimes"] = "deno"
         import sys, io
@@ -118,10 +134,17 @@ async def yt_dlp_get_url(query: str, max_results: int = 1, exclude_webpage: str 
     # detect live streams if yt-dlp exposes it
     is_live = bool(info.get("is_live") or info.get("live_status"))
 
-    return stream_url, title, webpage_url, is_live
+    # duration in seconds if yt_dlp provided it
+    duration = None
+    try:
+        duration = float(info.get("duration")) if isinstance(info, dict) and info.get("duration") else None
+    except Exception:
+        duration = None
+
+    return stream_url, title, webpage_url, is_live, duration
 
 
-async def yt_dlp_get_candidates(query: str, max_results: int = 10, exclude_webpage: str | None = None) -> List[Tuple[Optional[str], Optional[str], Optional[str], bool]]:
+async def yt_dlp_get_candidates(query: str, max_results: int = 10, exclude_webpage: str | None = None) -> List[Tuple[Optional[str], Optional[str], Optional[str], bool, float | None]]:
     """Return a list of candidate tuples (stream_url, title, webpage_url, is_live).
 
     This aggregates multiple yt-dlp entries and returns them for local shuffling/filtering.
@@ -143,7 +166,14 @@ async def yt_dlp_get_candidates(query: str, max_results: int = 10, exclude_webpa
     def extract():
         import shutil as _sh
         has_deno = bool(_sh.which("deno"))
+        # See notes in yt_dlp_get_url about cookies env vars
         ydl_opts = {"format": "bestaudio/best", "quiet": True, "no_warnings": True}
+        cookiefile = os.environ.get("DMBOT_YT_COOKIES")
+        cookies_from_browser = os.environ.get("DMBOT_YT_COOKIES_FROM_BROWSER")
+        if cookiefile:
+            ydl_opts["cookiefile"] = cookiefile
+        elif cookies_from_browser:
+            ydl_opts["cookiesfrombrowser"] = cookies_from_browser
         if has_deno:
             ydl_opts["jsruntimes"] = "deno"
         import sys, io
@@ -182,7 +212,12 @@ async def yt_dlp_get_candidates(query: str, max_results: int = 10, exclude_webpa
             if best:
                 stream_url = best.get("url")
         is_live = bool(e.get("is_live") or e.get("live_status"))
-        candidates.append((stream_url, title, webpage_url, is_live))
+        duration = None
+        try:
+            duration = float(e.get("duration")) if isinstance(e, dict) and e.get("duration") else None
+        except Exception:
+            duration = None
+        candidates.append((stream_url, title, webpage_url, is_live, duration))
 
     return candidates
 
@@ -195,6 +230,7 @@ class Track:
     filename: str | None = None
     prefetched: bool = False
     is_live: bool = False
+    duration: float | None = None
 
 
 class MusicPlayer:
@@ -305,6 +341,7 @@ class MusicPlayer:
             logger.exception("Failed to save failed-queries to %s", self._failed_queries_file)
 
     async def player_loop(self):
+        logger.info("player_loop started for guild %s", self.guild.id)
         while True:
             # autoplay: if enabled and nothing queued, play from autoplay buffer (prefetched)
             if self.autoplay and self.current is None and self.queue.empty():
@@ -343,6 +380,24 @@ class MusicPlayer:
                 try:
                     source = discord.FFmpegPCMAudio(track.filename, executable=self.ffmpeg, before_options="", options=FFMPEG_OPTIONS)
 
+                    # start a progress monitor task to log elapsed time and percent
+                    async def _play_progress_monitor(t: Track, start_ts: float):
+                        try:
+                            interval = 5 if (t.duration and t.duration > 0) else 30
+                            while not self.next_event.is_set():
+                                elapsed = time.time() - start_ts
+                                if t.duration and t.duration > 0:
+                                    pct = min(100.0, (elapsed / t.duration) * 100.0)
+                                    logger.info("[guild %s] Playing '%s' elapsed=%.1fs / %.1fs (%.1f%%)", self.guild.id, t.title, elapsed, t.duration, pct)
+                                else:
+                                    logger.info("[guild %s] Playing '%s' elapsed=%.1fs", self.guild.id, t.title, elapsed)
+                                await asyncio.sleep(interval)
+                        except asyncio.CancelledError:
+                            return
+
+                    play_start = time.time()
+                    monitor_task = self.bot.loop.create_task(_play_progress_monitor(track, play_start))
+
                     def _after_local_prefetched(err):
                         if err:
                             logger.error("Local playback error: %s", err)
@@ -351,6 +406,12 @@ class MusicPlayer:
 
                     self.voice_client.play(source, after=_after_local_prefetched)
                     await self.next_event.wait()
+                    # ensure monitor is stopped
+                    try:
+                        if monitor_task and not monitor_task.done():
+                            monitor_task.cancel()
+                    except Exception:
+                        pass
                     self._record_play(track)
                     try:
                         # refill both queue prefetch and autoplay buffer in background
@@ -379,8 +440,31 @@ class MusicPlayer:
                             logger.error("Player error: %s", err)
                         self.bot.loop.call_soon_threadsafe(self.next_event.set)
 
+                    # start progress monitor for streamed playback
+                    async def _play_progress_monitor_stream(t: Track, start_ts: float):
+                        try:
+                            interval = 5 if (t.duration and t.duration > 0) else 30
+                            while not self.next_event.is_set():
+                                elapsed = time.time() - start_ts
+                                if t.duration and t.duration > 0:
+                                    pct = min(100.0, (elapsed / t.duration) * 100.0)
+                                    logger.info("[guild %s] Streaming '%s' elapsed=%.1fs / %.1fs (%.1f%%)", self.guild.id, t.title, elapsed, t.duration, pct)
+                                else:
+                                    logger.info("[guild %s] Streaming '%s' elapsed=%.1fs", self.guild.id, t.title, elapsed)
+                                await asyncio.sleep(interval)
+                        except asyncio.CancelledError:
+                            return
+
+                    play_start = time.time()
+                    monitor_task = self.bot.loop.create_task(_play_progress_monitor_stream(track, play_start))
+
                     self.voice_client.play(source, after=_after)
                     await self.next_event.wait()
+                    try:
+                        if monitor_task and not monitor_task.done():
+                            monitor_task.cancel()
+                    except Exception:
+                        pass
                     self._record_play(track)
                     try:
                         self.bot.loop.create_task(self.ensure_prefetch_ahead(6))
@@ -440,37 +524,61 @@ class MusicPlayer:
                             entry = info["entries"][0]
 
                         filename = ydl.prepare_filename(entry)
+                        # attach duration to track if available
+                        try:
+                            dur = entry.get('duration') if isinstance(entry, dict) else None
+                            if dur:
+                                track.duration = float(dur)
+                        except Exception:
+                            pass
                         logger.info("Prepared filename: %s", filename)
                         if not filename:
                             raise RuntimeError("Could not determine downloaded filename")
                         return filename
 
-                try:
-                    # If a prefetch for this URL is in progress, wait for it instead
-                    url_to_download = track.webpage_url or track.source_url
+                # If a prefetch for this URL is in progress, wait for it instead
+                url_to_download = track.webpage_url or track.source_url
+
+                async def _attempt_download_with_retries():
+                    # if there was a prefetch task, wait briefly for it
                     if url_to_download and url_to_download in self._prefetch_tasks:
                         pre_t = self._prefetch_tasks[url_to_download]
                         try:
                             await asyncio.wait_for(pre_t, timeout=30)
                         except Exception:
-                            # prefetch failed or timed out; we'll proceed to download
                             logger.info("Prefetch task did not produce a file or timed out; proceeding to download")
-                        # if prefetch set the filename on the track, use it
                         if track.filename and os.path.exists(track.filename):
-                            filename = track.filename
-                            logger.info("Using prefetched file from task: %s", filename)
-                        else:
-                            filename = await asyncio.wait_for(asyncio.to_thread(download), timeout=120)
-                            logger.info("Downloaded fallback file: %s", filename)
-                    else:
-                        filename = await asyncio.wait_for(asyncio.to_thread(download), timeout=120)
-                        logger.info("Downloaded fallback file: %s", filename)
-                except asyncio.TimeoutError:
-                    logger.error("yt-dlp download timed out for %s", track.source_url)
-                    raise
-                except Exception:
-                    logger.exception("yt-dlp download failed for %s", track.source_url)
-                    raise
+                            logger.info("Using prefetched file from task: %s", track.filename)
+                            return track.filename
+
+                    last_exc = None
+                    # perform initial attempt + configured retries
+                    attempts = max(1, DOWNLOAD_RETRIES) + 1
+                    for attempt in range(1, attempts + 1):
+                        # progressive timeout: base * 2^(attempt-1) for subsequent attempts
+                        timeout_secs = DOWNLOAD_TIMEOUT * (2 ** (attempt - 1)) if attempt > 1 else DOWNLOAD_TIMEOUT
+                        try:
+                            filename = await asyncio.wait_for(asyncio.to_thread(download), timeout=timeout_secs)
+                            logger.info("Downloaded fallback file: %s (attempt %d, timeout=%ds)", filename, attempt, timeout_secs)
+                            return filename
+                        except asyncio.TimeoutError as e:
+                            last_exc = e
+                            logger.warning("yt-dlp download attempt %d timed out after %d seconds for %s", attempt, timeout_secs, track.source_url)
+                        except Exception as e:
+                            last_exc = e
+                            logger.exception("yt-dlp download attempt %d failed for %s", attempt, track.source_url)
+                        # small backoff before retrying
+                        await asyncio.sleep(min(5 * attempt, 30))
+
+                    # all attempts failed
+                    if last_exc:
+                        raise last_exc
+                    raise RuntimeError("yt-dlp download failed without exception")
+
+                dl_start = time.time()
+                filename = await _attempt_download_with_retries()
+                dl_elapsed = time.time() - dl_start
+                logger.info("Download completed for '%s' in %.1fs -> %s", track.title, dl_elapsed, filename)
 
                 if not filename or not os.path.exists(filename):
                     raise RuntimeError("Downloaded file not found: %s" % filename)
@@ -491,8 +599,31 @@ class MusicPlayer:
                         pass
                     self.bot.loop.call_soon_threadsafe(self.next_event.set)
 
+                # start monitor for local playback
+                async def _play_progress_monitor_file(t: Track, start_ts: float):
+                    try:
+                        interval = 5 if (t.duration and t.duration > 0) else 30
+                        while not self.next_event.is_set():
+                            elapsed = time.time() - start_ts
+                            if t.duration and t.duration > 0:
+                                pct = min(100.0, (elapsed / t.duration) * 100.0)
+                                logger.info("[guild %s] Playing file '%s' elapsed=%.1fs / %.1fs (%.1f%%)", self.guild.id, t.title, elapsed, t.duration, pct)
+                            else:
+                                logger.info("[guild %s] Playing file '%s' elapsed=%.1fs", self.guild.id, t.title, elapsed)
+                            await asyncio.sleep(interval)
+                    except asyncio.CancelledError:
+                        return
+
+                play_start = time.time()
+                monitor_task = self.bot.loop.create_task(_play_progress_monitor_file(track, play_start))
+
                 self.voice_client.play(source, after=_after_local)
                 await self.next_event.wait()
+                try:
+                    if monitor_task and not monitor_task.done():
+                        monitor_task.cancel()
+                except Exception:
+                    pass
                 self._record_play(track)
                 try:
                     self.bot.loop.create_task(self.ensure_prefetch_ahead(6))
@@ -516,6 +647,7 @@ class MusicPlayer:
 
     async def enqueue(self, track: Track):
         await self.queue.put(track)
+        logger.info("Enqueued track for guild %s: %s (prefetched=%s, live=%s)", self.guild.id, track.title, track.prefetched, track.is_live)
         # ensure a few upcoming tracks are prefetched so playback is smooth
         try:
             await self.ensure_prefetch_ahead(6)
@@ -689,7 +821,7 @@ class MusicPlayer:
             await asyncio.sleep(0.2)
         return False
 
-    async def pick_autoplay_track(self, last_track: Track | None) -> Track | None:
+    async def pick_autoplay_track(self, last_track: Track | None, max_results: int = 30) -> Track | None:
         """Try to pick a similar track based on the last played track's title.
 
         Returns a new Track or None if no candidate found.
@@ -729,7 +861,7 @@ class MusicPlayer:
                         await asyncio.sleep(0.05)
                         continue
                     try:
-                        candidates = await yt_dlp_get_candidates(q, max_results=30, exclude_webpage=(last_track.webpage_url or None))
+                        candidates = await yt_dlp_get_candidates(q, max_results=max_results, exclude_webpage=(last_track.webpage_url or None))
                     except Exception as e:
                         # record failed query and skip for a while
                         try:
@@ -751,35 +883,69 @@ class MusicPlayer:
 
                     random.shuffle(candidates)
                     picked = None
-                    for stream_url, title, webpage_url, is_live in candidates:
-                        if not stream_url and not webpage_url:
-                            continue
+                    # prefer candidates that have a direct stream URL, are not live,
+                    # and have a reasonable duration to avoid 10+ hour mixes
+                    MAX_DURATION = 7200.0  # 2 hours
 
-                        cand_key = (webpage_url or stream_url or title) or ""
-                        norm_cand = _norm(cand_key)
-                        # compare against recent history and last_played
-                        dup = False
+                    def _is_dup(norm_cand: str) -> bool:
+                        if not norm_cand:
+                            return True
                         for h in list(self.play_history):
                             if _norm(h) and _norm(h) == norm_cand:
-                                dup = True
-                                break
-                        if not dup:
-                            for h in self._persisted_history.get(str(self.guild.id), []):
-                                if _norm(h) and _norm(h) == norm_cand:
-                                    dup = True
-                                    break
+                                return True
+                        for h in self._persisted_history.get(str(self.guild.id), []):
+                            if _norm(h) and _norm(h) == norm_cand:
+                                return True
                         if last_track:
                             if _norm(last_track.webpage_url or last_track.source_url or last_track.title) == norm_cand:
-                                dup = True
-                        if dup:
+                                return True
+                        return False
+
+                    # first pass: find best-playable candidate
+                    for stream_url, title, webpage_url, is_live, duration in candidates:
+                        if not stream_url:
                             continue
-                        picked = (stream_url, title, webpage_url, is_live)
-                        break
+                        cand_key = (webpage_url or stream_url or title) or ""
+                        norm_cand = _norm(cand_key)
+                        if _is_dup(norm_cand):
+                            continue
+                        if is_live:
+                            logger.debug("Skipping live candidate for autoplay: %s", title)
+                            continue
+                        if duration and duration > 0 and duration <= MAX_DURATION:
+                            picked = (stream_url, title, webpage_url, is_live, duration)
+                            break
+
+                    # second pass: relax duration requirement but still prefer direct streams
+                    if not picked:
+                        for stream_url, title, webpage_url, is_live, duration in candidates:
+                            if not stream_url:
+                                continue
+                            cand_key = (webpage_url or stream_url or title) or ""
+                            norm_cand = _norm(cand_key)
+                            if _is_dup(norm_cand):
+                                continue
+                            if is_live:
+                                continue
+                            picked = (stream_url, title, webpage_url, is_live, duration)
+                            break
+
+                    # final fallback: accept candidates without direct stream (may require download)
+                    if not picked:
+                        for stream_url, title, webpage_url, is_live, duration in candidates:
+                            if not stream_url and not webpage_url:
+                                continue
+                            cand_key = (webpage_url or stream_url or title) or ""
+                            norm_cand = _norm(cand_key)
+                            if _is_dup(norm_cand):
+                                continue
+                            picked = (stream_url, title, webpage_url, is_live, duration)
+                            break
 
                     if picked:
-                        stream_url, title, webpage_url, is_live = picked
+                        stream_url, title, webpage_url, is_live, duration = picked
                         chosen_source = stream_url if (stream_url and stream_url != webpage_url) else None
-                        return Track(title=title or last_track.title, source_url=chosen_source, webpage_url=webpage_url, is_live=is_live)
+                        return Track(title=title or last_track.title, source_url=chosen_source, webpage_url=webpage_url, is_live=is_live, duration=duration)
                     # no acceptable candidates for this query -> mark as failed
                     try:
                         self._failed_queries[q] = now
@@ -825,7 +991,7 @@ class MusicPlayer:
                     logger.debug("Autoplay: skipping recently-failed fallback query '%s'", q)
                     continue
                 try:
-                    candidates = await yt_dlp_get_candidates(q, max_results=30, exclude_webpage=(last_track.webpage_url if last_track else None))
+                    candidates = await yt_dlp_get_candidates(q, max_results=max_results, exclude_webpage=(last_track.webpage_url if last_track else None))
                 except Exception:
                     try:
                         self._failed_queries[q] = now
@@ -843,40 +1009,51 @@ class MusicPlayer:
 
                 random.shuffle(candidates)
                 picked = None
-                for stream_url, title, webpage_url, is_live in candidates:
+                # prefer playable candidates with direct streams and reasonable duration
+                MAX_DURATION = 7200.0
+
+                def _is_dup_fallback(norm_cand: str) -> bool:
+                    if not norm_cand:
+                        return True
+                    if any(_norm(h) == norm_cand for h in history_titles):
+                        return True
+                    return False
+
+                for stream_url, title, webpage_url, is_live, duration in candidates:
                     if not stream_url and not webpage_url:
                         continue
                     cand_title = title or webpage_url or stream_url or q
                     cand_norm = _norm(cand_title)
                     if not cand_norm:
                         continue
-
-                    # Reject if exact normalized match in history
-                    if any(_norm(h) == cand_norm for h in history_titles):
+                    if _is_dup_fallback(cand_norm):
                         continue
-
-                    # Reject if candidate is too similar to any recent title (covers remixes/covers)
-                    too_similar = False
-                    for h in history_titles:
-                        if _word_overlap(cand_title, h) > similarity_threshold:
-                            too_similar = True
-                            break
-                    if too_similar:
+                    if is_live:
                         continue
+                    if duration and duration > 0 and duration <= MAX_DURATION:
+                        picked = (stream_url, title, webpage_url, is_live, duration)
+                        break
 
-                    # Also avoid very high overlap with the immediate last track
-                    if last_track and last_track.title:
-                        if _word_overlap(cand_title, last_track.title) > similarity_threshold:
+                if not picked:
+                    for stream_url, title, webpage_url, is_live, duration in candidates:
+                        if not stream_url and not webpage_url:
                             continue
-
-                    picked = (stream_url, title, webpage_url, is_live)
-                    break
+                        cand_title = title or webpage_url or stream_url or q
+                        cand_norm = _norm(cand_title)
+                        if not cand_norm:
+                            continue
+                        if _is_dup_fallback(cand_norm):
+                            continue
+                        if is_live:
+                            continue
+                        picked = (stream_url, title, webpage_url, is_live, duration)
+                        break
 
                 if picked:
-                    stream_url, title, webpage_url, is_live = picked
+                    stream_url, title, webpage_url, is_live, duration = picked
                     logger.info("Autoplay fallback: selected '%s' from query '%s'", title, q)
                     chosen_source = stream_url if (stream_url and stream_url != webpage_url) else None
-                    return Track(title=title or "Autoplay", source_url=chosen_source, webpage_url=webpage_url, is_live=is_live)
+                    return Track(title=title or "Autoplay", source_url=chosen_source, webpage_url=webpage_url, is_live=is_live, duration=duration)
                 try:
                     self._failed_queries[q] = now
                     self.bot.loop.create_task(asyncio.to_thread(self._save_failed_queries_sync))

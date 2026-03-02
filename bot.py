@@ -11,7 +11,7 @@ import discord
 from typing import Optional
 from discord.ext import commands
 
-from player import MusicPlayer, Track, yt_dlp_get_url
+from player import MusicPlayer, Track, yt_dlp_get_url, yt_dlp_get_candidates
 from worker import run_worker
 
 logging.basicConfig(level=logging.INFO)
@@ -73,7 +73,7 @@ def create_bot() -> ControllerBot:
             if query.startswith("http://") or query.startswith("https://"):
                 # probe the URL to detect live streams and a resolved stream URL if possible
                 try:
-                    stream_url, probed_title, webpage_url, is_live = await yt_dlp_get_url(query)
+                    stream_url, probed_title, webpage_url, is_live, duration = await yt_dlp_get_url(query)
                     if probed_title:
                         title = f"Requested: {probed_title}"
                 except Exception:
@@ -86,7 +86,7 @@ def create_bot() -> ControllerBot:
                 webpage_url = f"ytsearch1:{query}"
         else:
             try:
-                stream_url, title, webpage_url, is_live = await yt_dlp_get_url(query)
+                stream_url, title, webpage_url, is_live, duration = await yt_dlp_get_url(query)
             except Exception as e:
                 await ctx.send(f"Failed to get audio: {e}")
                 return
@@ -103,17 +103,20 @@ def create_bot() -> ControllerBot:
             is_live_flag = bool(is_live)
         except Exception:
             is_live_flag = False
-        track = Track(title=title or query, source_url=stream_url, webpage_url=webpage_url, is_live=is_live_flag)
+        track = Track(title=title or query, source_url=stream_url, webpage_url=webpage_url, is_live=is_live_flag, duration=locals().get('duration', None))
         if player.is_playing():
             await player.enqueue(track)
+            logger.info("Queued track for guild %s: %s", ctx.guild.id if ctx.guild else None, track.title)
             await ctx.send(f"Queued: {track.title}")
         else:
             await player.enqueue(track)
+            logger.info("Enqueued and starting playback for guild %s: %s", ctx.guild.id if ctx.guild else None, track.title)
             await ctx.send(f"Playing: {track.title}")
 
     async def skip(ctx: commands.Context):
         player = bot.get_player(ctx.guild)
         if player.voice_client and player.voice_client.is_playing():
+            logger.info("Skip requested by %s in guild %s", getattr(ctx.author, 'name', None), ctx.guild.id if ctx.guild else None)
             player.voice_client.stop()
             await ctx.send("Skipped.")
             # try to advance autoplay immediately if enabled
@@ -178,6 +181,7 @@ def create_bot() -> ControllerBot:
 
     async def stop_cmd(ctx: commands.Context):
         player = bot.get_player(ctx.guild)
+        logger.info("Stop requested by %s in guild %s", getattr(ctx.author, 'name', None), ctx.guild.id if ctx.guild else None)
         await player.stop()
         await ctx.send("Stopped and cleared queue.")
 
@@ -242,20 +246,121 @@ def create_bot() -> ControllerBot:
             # if nothing is playing, enqueue an autoplay seed
             if not player.is_playing():
                 try:
-                    # attempt to ensure at least one prefetched autoplay track (wait briefly)
-                    ready = await player.ensure_autoplay_ready(min_prefetched=1, timeout=10.0)
+                    # start background buffer fill without waiting
+                    try:
+                        player.bot.loop.create_task(player.fill_autoplay_buffer(5))
+                    except Exception:
+                        logger.exception("Failed to start background autoplay buffer fill")
+
+                    # first try a fast immediate search (fewer candidates) to reduce latency
+                    try:
+                        next_track = await asyncio.wait_for(player.pick_autoplay_track(player.last_played, max_results=6), timeout=8.0)
+                        if next_track:
+                            logger.info("Fast autoplay selected: %s", next_track.title)
+                            # try to resolve a direct stream URL quickly to avoid download fallback delays
+                            try:
+                                if not next_track.source_url and (next_track.webpage_url or next_track.title):
+                                    logger.info("Resolving stream URL for autoplay pick: %s", next_track.webpage_url or next_track.title)
+                                    try:
+                                        stream_url, title_r, webpage_r, is_live_r, duration_r = await asyncio.wait_for(yt_dlp_get_url(next_track.webpage_url or next_track.title, max_results=1), timeout=6.0)
+                                        next_track.source_url = stream_url or next_track.source_url
+                                        if duration_r:
+                                            next_track.duration = duration_r
+                                        if title_r:
+                                            next_track.title = title_r
+                                        # If no direct stream url found, try extracting individual candidates from the webpage (mix/playlist)
+                                        if not next_track.source_url and next_track.webpage_url:
+                                            try:
+                                                logger.info("No direct stream URL; fetching candidates from %s", next_track.webpage_url)
+                                                cands = await asyncio.wait_for(yt_dlp_get_candidates(next_track.webpage_url, max_results=6), timeout=8.0)
+                                                for s_url, s_title, s_webpage, s_is_live in cands:
+                                                    if s_url or s_webpage:
+                                                        logger.info("Autoplay candidate chosen from webpage: %s", s_title or s_webpage)
+                                                        next_track.source_url = s_url or next_track.source_url
+                                                        next_track.webpage_url = s_webpage or next_track.webpage_url
+                                                        if s_title:
+                                                            next_track.title = s_title
+                                                        next_track.is_live = s_is_live
+                                                        break
+                                            except asyncio.TimeoutError:
+                                                logger.info("Candidate fetch timed out for %s", next_track.webpage_url)
+                                            except Exception:
+                                                logger.exception("Failed to fetch candidates for %s", next_track.webpage_url)
+                                    except asyncio.TimeoutError:
+                                        logger.info("Quick resolve timed out for autoplay pick: %s", next_track.title)
+                                    except Exception:
+                                        logger.exception("Quick resolve failed for autoplay pick: %s", next_track.title)
+                            except Exception:
+                                logger.exception("Unexpected error resolving autoplay pick stream URL")
+
+                            try:
+                                logger.info("Attempting to enqueue autoplay pick for guild %s: %s", ctx.guild.id if ctx.guild else None, next_track.title)
+                                await player.enqueue(next_track)
+                                await ctx.send(f"Autoplay started: {next_track.title}")
+                            except Exception:
+                                logger.exception("Failed to enqueue autoplay pick: %s", next_track.title)
+                                await ctx.send("Autoplay failed to enqueue the selected track.")
+                            return
+                    except asyncio.TimeoutError:
+                        logger.info("Fast autoplay pick timed out; attempting quick direct search before buffer/prefetch")
+                        # try a very quick direct search by genre/title to get something playing fast
+                        try:
+                            quick_q = player.autoplay_genre or "popular music"
+                            logger.info("Quick direct autoplay search using query: %s", quick_q)
+                            try:
+                                stream_url, title_r, webpage_r, is_live_r, duration_r = await asyncio.wait_for(yt_dlp_get_url(quick_q, max_results=1), timeout=6.0)
+                            except asyncio.TimeoutError:
+                                logger.info("Quick direct search timed out for query: %s", quick_q)
+                                raise
+                            if stream_url or webpage_r:
+                                quick_track = Track(title=title_r or quick_q, source_url=stream_url, webpage_url=webpage_r, is_live=bool(is_live_r), duration=duration_r)
+                                try:
+                                    logger.info("Quick direct search found autoplay track: %s", quick_track.title)
+                                    await player.enqueue(quick_track)
+                                    await ctx.send(f"Autoplay started: {quick_track.title}")
+                                    return
+                                except Exception:
+                                    logger.exception("Failed to enqueue quick autoplay track: %s", quick_track.title)
+                        except Exception:
+                            logger.info("Quick direct search did not produce a usable track; falling back to buffer/prefetch")
+                    except Exception:
+                        logger.exception("Fast autoplay pick failed; falling back to buffer/prefetch")
+
+                    # attempt to ensure at least one prefetched autoplay track (short timeout)
+                    ready = await player.ensure_autoplay_ready(min_prefetched=1, timeout=6.0)
                     if ready and player.autoplay_buffer:
                         next_track = player.autoplay_buffer.popleft()
-                        await player.enqueue(next_track)
-                        await ctx.send(f"Autoplay started (buffered): {next_track.title}")
-                    else:
-                        # fallback to immediate pick if buffer not ready
-                        next_track = await player.pick_autoplay_track(player.last_played)
-                        if next_track:
+                        try:
+                            logger.info("Attempting to enqueue buffered autoplay track for guild %s: %s", ctx.guild.id if ctx.guild else None, next_track.title)
                             await player.enqueue(next_track)
-                            await ctx.send(f"Autoplay started: {next_track.title}")
+                            await ctx.send(f"Autoplay started (buffered): {next_track.title}")
+                        except Exception:
+                            logger.exception("Failed to enqueue buffered autoplay track: %s", next_track.title)
+                            await ctx.send("Autoplay failed to enqueue buffered track.")
+                        return
+
+                    # final fallback: try a full pick (longer but may still yield a result)
+                    try:
+                        next_track = await asyncio.wait_for(player.pick_autoplay_track(player.last_played), timeout=12.0)
+                        if next_track:
+                            try:
+                                logger.info("Attempting to enqueue fallback autoplay pick for guild %s: %s", ctx.guild.id if ctx.guild else None, next_track.title)
+                                await player.enqueue(next_track)
+                                await ctx.send(f"Autoplay started: {next_track.title}")
+                            except Exception:
+                                logger.exception("Failed to enqueue fallback autoplay pick: %s", next_track.title)
+                                await ctx.send("Autoplay failed to enqueue the selected track.")
+                            return
                         else:
                             await ctx.send("Autoplay failed to find a track.")
+                            return
+                    except asyncio.TimeoutError:
+                        await ctx.send("Autoplay timed out trying to find a track.")
+                        return
+                    except Exception:
+                        logger.exception("Autoplay failed to find a track.")
+                        await ctx.send("Autoplay failed to find a track.")
+                        return
                 except Exception:
                     await ctx.send("Autoplay failed to find a track.")
 
@@ -270,6 +375,18 @@ def create_bot() -> ControllerBot:
     bot.add_command(commands.Command(resume, name="resume"))
     bot.add_command(commands.Command(volume, name="volume"))
     bot.add_command(commands.Command(autoplay_cmd, name="autoplay"))
+    async def status_cmd(ctx: commands.Context):
+        player = bot.get_player(ctx.guild)
+        vc = player.voice_client
+        status = []
+        status.append(f"Voice connected: {bool(vc and vc.is_connected())}")
+        status.append(f"Is playing: {player.is_playing()}")
+        status.append(f"Queue size: {player.queue.qsize()}")
+        status.append(f"Autoplay buffer size: {len(player.autoplay_buffer)}")
+        status.append(f"Autoplay enabled: {getattr(player, 'autoplay', False)}")
+        status.append(f"Last played: {player.last_played.title if player.last_played else None}")
+        await ctx.send("\n".join(status))
+    bot.add_command(commands.Command(status_cmd, name="status"))
 
     return bot
 
