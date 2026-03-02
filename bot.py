@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 from multiprocessing import Manager, Process
+import urllib.parse
 
 import discord
 from typing import Optional
@@ -13,6 +14,7 @@ from discord.ext import commands
 
 from player import MusicPlayer, Track, yt_dlp_get_url, yt_dlp_get_candidates
 from worker import run_worker
+import playlists
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("dmbot")
@@ -39,6 +41,37 @@ class ControllerBot(commands.Bot):
             self.worker_proc = Process(target=run_worker, args=(self.task_queue,), daemon=True)
             self.worker_proc.start()
             logger.info("Started download worker process")
+        # initialize playlists DB
+        try:
+            await playlists.init_db()
+            logger.info("Playlists DB initialized")
+        except Exception:
+            logger.exception("Failed to initialize playlists DB")
+        # register persistent UI main menu view so controls survive restarts
+        try:
+            from ui import MainMenuView
+            # add a persistent main menu view (timeout=None)
+            try:
+                self.add_view(MainMenuView(self, timeout=None))
+                logger.info("Registered persistent MainMenuView")
+            except Exception:
+                logger.exception("Failed to register MainMenuView persistently")
+        except Exception:
+            # UI may not be available yet; ignore
+            pass
+        # register the autoplay-button view so the 'Open Autoplay' / '247 Play' button
+        # remain functional after bot restarts (Discord routes interactions by custom_id)
+        try:
+            from ui import AutoplayButtonView
+            try:
+                self.add_view(AutoplayButtonView(self, timeout=None))
+                logger.info("Registered persistent AutoplayButtonView")
+            except Exception:
+                logger.exception("Failed to register AutoplayButtonView persistently")
+        except Exception:
+            # UI may not be available yet; ignore
+            pass
+        
 
     def get_player(self, guild: discord.Guild) -> MusicPlayer:
         if guild.id not in self.players:
@@ -94,7 +127,23 @@ def create_bot() -> ControllerBot:
         # debug: show which stream url was selected (best-effort)
         if stream_url:
             try:
-                await ctx.send(f"Resolved stream: {stream_url}")
+                def _summarize_url(u: str) -> str:
+                    try:
+                        p = urllib.parse.urlparse(u)
+                        host = p.netloc or ''
+                        tail = os.path.basename(p.path) or ''
+                        token = f"{host}/{tail}" if tail else host
+                        if len(token) > 60:
+                            token = token[:57] + "..."
+                        return token
+                    except Exception:
+                        return u if len(u) <= 80 else u[:77] + "..."
+
+                summary = _summarize_url(stream_url)
+                if title:
+                    await ctx.send(f"Resolved stream for '{title}': {summary}")
+                else:
+                    await ctx.send(f"Resolved stream: {summary}")
             except Exception:
                 pass
 
@@ -130,6 +179,12 @@ def create_bot() -> ControllerBot:
                                 player.last_voice_channel_id = ctx.author.voice.channel.id
                             except Exception:
                                 pass
+                        # If there are queued items, prefer them and do not enqueue autoplay
+                        try:
+                            if not player.queue.empty():
+                                return
+                        except Exception:
+                            pass
                         # try using buffer or pick and enqueue
                         await player.fill_autoplay_buffer(5)
                         if player.autoplay_buffer:
@@ -143,32 +198,50 @@ def create_bot() -> ControllerBot:
                         logger.exception("Autoplay advance after skip failed")
 
                 bot.loop.create_task(_advance())
-        else:
-            # nothing is playing; if autoplay is on attempt to start next
-            if getattr(player, "autoplay", False):
-                await ctx.send("Nothing is playing — attempting to resume autoplay.")
-                async def _start():
+            else:
+                # nothing is playing; if autoplay is on attempt to start next
+                if getattr(player, "autoplay", False):
+                    # If there are queued items, prefer them and do not start autoplay
                     try:
-                        if (not player.voice_client or not player.voice_client.is_connected()) and ctx.author.voice and ctx.author.voice.channel:
+                        if not player.queue.empty():
                             try:
-                                player.voice_client = await ctx.author.voice.channel.connect()
-                                player.last_voice_channel_id = ctx.author.voice.channel.id
+                                await ctx.send("There are queued tracks — resuming queued playback.")
                             except Exception:
                                 pass
-                        await player.fill_autoplay_buffer(5)
-                        if player.autoplay_buffer:
-                            nt = player.autoplay_buffer.popleft()
-                            await player.enqueue(nt)
-                        else:
-                            nt = await player.pick_autoplay_track(player.last_played)
-                            if nt:
-                                await player.enqueue(nt)
+                            # ensure voice is connected if possible, then return
+                            if (not player.voice_client or not player.voice_client.is_connected()) and ctx.author.voice and ctx.author.voice.channel:
+                                try:
+                                    player.voice_client = await ctx.author.voice.channel.connect()
+                                    player.last_voice_channel_id = ctx.author.voice.channel.id
+                                except Exception:
+                                    pass
+                            return
                     except Exception:
-                        logger.exception("Autoplay start from skip/no-play failed")
+                        pass
 
-                bot.loop.create_task(_start())
-            else:
-                await ctx.send("Nothing is playing.")
+                    await ctx.send("Nothing is playing — attempting to resume autoplay.")
+                    async def _start():
+                        try:
+                            if (not player.voice_client or not player.voice_client.is_connected()) and ctx.author.voice and ctx.author.voice.channel:
+                                try:
+                                    player.voice_client = await ctx.author.voice.channel.connect()
+                                    player.last_voice_channel_id = ctx.author.voice.channel.id
+                                except Exception:
+                                    pass
+                            await player.fill_autoplay_buffer(5)
+                            if player.autoplay_buffer:
+                                nt = player.autoplay_buffer.popleft()
+                                await player.enqueue(nt)
+                            else:
+                                nt = await player.pick_autoplay_track(player.last_played)
+                                if nt:
+                                    await player.enqueue(nt)
+                        except Exception:
+                            logger.exception("Autoplay start from skip/no-play failed")
+
+                    bot.loop.create_task(_start())
+                else:
+                    await ctx.send("Nothing is playing.")
 
     async def _queue(ctx: commands.Context):
         player = bot.get_player(ctx.guild)
@@ -220,149 +293,16 @@ def create_bot() -> ControllerBot:
         await ctx.send(help_text)
 
     async def autoplay_cmd(ctx: commands.Context, *, genre: Optional[str] = None):
-        player = bot.get_player(ctx.guild)
-        if genre:
-            # set specific genre and enable autoplay
-            player.autoplay_genre = genre.strip().lower()
-            player.autoplay = True
-            await ctx.send(f"Autoplay ON (genre: {player.autoplay_genre})")
-        else:
-            # toggle
-            player.autoplay = not getattr(player, "autoplay", False)
-            status = "ON" if player.autoplay else "OFF"
-            await ctx.send(f"Autoplay {status}")
-
-        # If turned on and bot not connected but the author is in voice, join and start playing
-        if player.autoplay:
-            if (not player.voice_client or not player.voice_client.is_connected()) and ctx.author.voice and ctx.author.voice.channel:
-                try:
-                    channel = ctx.author.voice.channel
-                    player.voice_client = await channel.connect()
-                    player.last_voice_channel_id = channel.id
-                except Exception as e:
-                    await ctx.send(f"Failed to join voice channel: {e}")
-                    return
-
-            # if nothing is playing, enqueue an autoplay seed
-            if not player.is_playing():
-                try:
-                    # start background buffer fill without waiting
-                    try:
-                        player.bot.loop.create_task(player.fill_autoplay_buffer(5))
-                    except Exception:
-                        logger.exception("Failed to start background autoplay buffer fill")
-
-                    # first try a fast immediate search (fewer candidates) to reduce latency
-                    try:
-                        next_track = await asyncio.wait_for(player.pick_autoplay_track(player.last_played, max_results=6), timeout=8.0)
-                        if next_track:
-                            logger.info("Fast autoplay selected: %s", next_track.title)
-                            # try to resolve a direct stream URL quickly to avoid download fallback delays
-                            try:
-                                if not next_track.source_url and (next_track.webpage_url or next_track.title):
-                                    logger.info("Resolving stream URL for autoplay pick: %s", next_track.webpage_url or next_track.title)
-                                    try:
-                                        stream_url, title_r, webpage_r, is_live_r, duration_r = await asyncio.wait_for(yt_dlp_get_url(next_track.webpage_url or next_track.title, max_results=1), timeout=6.0)
-                                        next_track.source_url = stream_url or next_track.source_url
-                                        if duration_r:
-                                            next_track.duration = duration_r
-                                        if title_r:
-                                            next_track.title = title_r
-                                        # If no direct stream url found, try extracting individual candidates from the webpage (mix/playlist)
-                                        if not next_track.source_url and next_track.webpage_url:
-                                            try:
-                                                logger.info("No direct stream URL; fetching candidates from %s", next_track.webpage_url)
-                                                cands = await asyncio.wait_for(yt_dlp_get_candidates(next_track.webpage_url, max_results=6), timeout=8.0)
-                                                for s_url, s_title, s_webpage, s_is_live in cands:
-                                                    if s_url or s_webpage:
-                                                        logger.info("Autoplay candidate chosen from webpage: %s", s_title or s_webpage)
-                                                        next_track.source_url = s_url or next_track.source_url
-                                                        next_track.webpage_url = s_webpage or next_track.webpage_url
-                                                        if s_title:
-                                                            next_track.title = s_title
-                                                        next_track.is_live = s_is_live
-                                                        break
-                                            except asyncio.TimeoutError:
-                                                logger.info("Candidate fetch timed out for %s", next_track.webpage_url)
-                                            except Exception:
-                                                logger.exception("Failed to fetch candidates for %s", next_track.webpage_url)
-                                    except asyncio.TimeoutError:
-                                        logger.info("Quick resolve timed out for autoplay pick: %s", next_track.title)
-                                    except Exception:
-                                        logger.exception("Quick resolve failed for autoplay pick: %s", next_track.title)
-                            except Exception:
-                                logger.exception("Unexpected error resolving autoplay pick stream URL")
-
-                            try:
-                                logger.info("Attempting to enqueue autoplay pick for guild %s: %s", ctx.guild.id if ctx.guild else None, next_track.title)
-                                await player.enqueue(next_track)
-                                await ctx.send(f"Autoplay started: {next_track.title}")
-                            except Exception:
-                                logger.exception("Failed to enqueue autoplay pick: %s", next_track.title)
-                                await ctx.send("Autoplay failed to enqueue the selected track.")
-                            return
-                    except asyncio.TimeoutError:
-                        logger.info("Fast autoplay pick timed out; attempting quick direct search before buffer/prefetch")
-                        # try a very quick direct search by genre/title to get something playing fast
-                        try:
-                            quick_q = player.autoplay_genre or "popular music"
-                            logger.info("Quick direct autoplay search using query: %s", quick_q)
-                            try:
-                                stream_url, title_r, webpage_r, is_live_r, duration_r = await asyncio.wait_for(yt_dlp_get_url(quick_q, max_results=1), timeout=6.0)
-                            except asyncio.TimeoutError:
-                                logger.info("Quick direct search timed out for query: %s", quick_q)
-                                raise
-                            if stream_url or webpage_r:
-                                quick_track = Track(title=title_r or quick_q, source_url=stream_url, webpage_url=webpage_r, is_live=bool(is_live_r), duration=duration_r)
-                                try:
-                                    logger.info("Quick direct search found autoplay track: %s", quick_track.title)
-                                    await player.enqueue(quick_track)
-                                    await ctx.send(f"Autoplay started: {quick_track.title}")
-                                    return
-                                except Exception:
-                                    logger.exception("Failed to enqueue quick autoplay track: %s", quick_track.title)
-                        except Exception:
-                            logger.info("Quick direct search did not produce a usable track; falling back to buffer/prefetch")
-                    except Exception:
-                        logger.exception("Fast autoplay pick failed; falling back to buffer/prefetch")
-
-                    # attempt to ensure at least one prefetched autoplay track (short timeout)
-                    ready = await player.ensure_autoplay_ready(min_prefetched=1, timeout=6.0)
-                    if ready and player.autoplay_buffer:
-                        next_track = player.autoplay_buffer.popleft()
-                        try:
-                            logger.info("Attempting to enqueue buffered autoplay track for guild %s: %s", ctx.guild.id if ctx.guild else None, next_track.title)
-                            await player.enqueue(next_track)
-                            await ctx.send(f"Autoplay started (buffered): {next_track.title}")
-                        except Exception:
-                            logger.exception("Failed to enqueue buffered autoplay track: %s", next_track.title)
-                            await ctx.send("Autoplay failed to enqueue buffered track.")
-                        return
-
-                    # final fallback: try a full pick (longer but may still yield a result)
-                    try:
-                        next_track = await asyncio.wait_for(player.pick_autoplay_track(player.last_played), timeout=12.0)
-                        if next_track:
-                            try:
-                                logger.info("Attempting to enqueue fallback autoplay pick for guild %s: %s", ctx.guild.id if ctx.guild else None, next_track.title)
-                                await player.enqueue(next_track)
-                                await ctx.send(f"Autoplay started: {next_track.title}")
-                            except Exception:
-                                logger.exception("Failed to enqueue fallback autoplay pick: %s", next_track.title)
-                                await ctx.send("Autoplay failed to enqueue the selected track.")
-                            return
-                        else:
-                            await ctx.send("Autoplay failed to find a track.")
-                            return
-                    except asyncio.TimeoutError:
-                        await ctx.send("Autoplay timed out trying to find a track.")
-                        return
-                    except Exception:
-                        logger.exception("Autoplay failed to find a track.")
-                        await ctx.send("Autoplay failed to find a track.")
-                        return
-                except Exception:
-                    await ctx.send("Autoplay failed to find a track.")
+        # Open the autoplay configuration GUI instead of accepting genre via chat
+        try:
+            from ui import AutoplayButtonView
+            view = AutoplayButtonView(bot)
+            try:
+                await ctx.send("Autoplay menu:", view=view)
+            except Exception:
+                await ctx.send("Autoplay must be configured via the Autoplay GUI. Use the '247 Play' button in the main menu.")
+        except Exception:
+            await ctx.send("Autoplay must be configured via the Autoplay GUI. Use the '247 Play' button in the main menu.")
 
     # register commands
     bot.add_command(commands.Command(play, name="play"))
@@ -386,7 +326,242 @@ def create_bot() -> ControllerBot:
         status.append(f"Autoplay enabled: {getattr(player, 'autoplay', False)}")
         status.append(f"Last played: {player.last_played.title if player.last_played else None}")
         await ctx.send("\n".join(status))
+    async def nowplaying_cmd(ctx: commands.Context):
+        player = bot.get_player(ctx.guild)
+        track = player.current or player.last_played
+        if not track:
+            await ctx.send("Nothing is playing.")
+            return
+
+        def _fmt_duration(d: float | None) -> str:
+            try:
+                if not d or d <= 0:
+                    return "Unknown"
+                s = int(d)
+                h, m = divmod(s, 3600)
+                m, s = divmod(m, 60)
+                if h:
+                    return f"{h:d}:{m:02d}:{s:02d}"
+                return f"{m:d}:{s:02d}"
+            except Exception:
+                return "Unknown"
+
+        parts = []
+        parts.append(f"Title: {track.title}")
+        parts.append(f"Duration: {_fmt_duration(track.duration)}")
+        parts.append(f"Live: {bool(getattr(track, 'is_live', False))}")
+        if getattr(track, 'webpage_url', None):
+            parts.append(f"URL: {track.webpage_url}")
+        elif getattr(track, 'source_url', None):
+            parts.append(f"Source: {track.source_url}")
+
+        await ctx.send("\n".join(parts))
     bot.add_command(commands.Command(status_cmd, name="status"))
+    bot.add_command(commands.Command(nowplaying_cmd, name="nowplaying"))
+
+    async def playlist_cmd(ctx: commands.Context, *args):
+        """Dispatch playlist subcommands:
+        create, add, remove, view, list, edit, delete, play
+        """
+        if not args:
+            # open playlist browser GUI
+            try:
+                from ui import PlaylistBrowserView
+                view = PlaylistBrowserView(bot, owner_id=str(ctx.author.id))
+                await view._load(ctx.guild)
+                embed = view._build_embed()
+                view.build_select()
+                await ctx.send(embed=embed, view=view)
+                return
+            except Exception as e:
+                await ctx.send(f"Failed to open playlist browser: {e}")
+                return
+        sub = args[0].lower()
+        try:
+            if sub == "create":
+                if len(args) < 2:
+                    await ctx.send("Usage: !playlist create <name>")
+                    return
+                name = " ".join(args[1:]).strip()
+                pid = await playlists.create_playlist(str(ctx.author.id), name)
+                await ctx.send(f"Created playlist '{name}'.")
+                return
+
+            if sub == "add":
+                if len(args) < 2:
+                    await ctx.send("Usage: !playlist add <playlist name>")
+                    return
+                pname = " ".join(args[1:]).strip()
+                player = bot.get_player(ctx.guild)
+                track = player.current or player.last_played
+                if not track:
+                    await ctx.send("No current track to add. Play a song first.")
+                    return
+                ok = await playlists.add_item(str(ctx.author.id), pname, getattr(track, 'title', 'Unknown'), getattr(track, 'webpage_url', None), getattr(track, 'source_url', None), getattr(track, 'duration', None), bool(getattr(track, 'is_live', False)))
+                if ok:
+                    await ctx.send(f"Added '{track.title}' to playlist '{pname}'.")
+                else:
+                    await ctx.send(f"Failed to add to playlist '{pname}'. Does it exist and belong to you?")
+                return
+
+            if sub == "remove":
+                if len(args) < 3:
+                    await ctx.send("Usage: !playlist remove <playlist name> <song index>")
+                    return
+                pname = " ".join(args[1:-1]).strip()
+                try:
+                    idx = int(args[-1])
+                except Exception:
+                    await ctx.send("Index must be a number")
+                    return
+                ok = await playlists.remove_item(str(ctx.author.id), pname, idx)
+                if ok:
+                    await ctx.send(f"Removed item {idx} from '{pname}'.")
+                else:
+                    await ctx.send(f"Failed to remove item {idx} from '{pname}'.")
+                return
+
+            if sub == "view":
+                if len(args) < 2:
+                    await ctx.send("Usage: !playlist view <playlist name>")
+                    return
+                pname = " ".join(args[1:]).strip()
+                meta = await playlists.view_playlist(str(ctx.author.id), pname)
+                if not meta:
+                    await ctx.send(f"Playlist '{pname}' not found or not visible.")
+                    return
+                lines = [f"Playlist: {meta['name']} (owner: {meta['owner_id']}, visibility: {meta['visibility']})"]
+                if not meta.get('items'):
+                    lines.append("(empty)")
+                else:
+                    def _fmt(d):
+                        try:
+                            if not d:
+                                return "Unknown"
+                            s = int(d)
+                            h, m = divmod(s, 3600)
+                            m, s = divmod(m, 60)
+                            if h:
+                                return f"{h:d}:{m:02d}:{s:02d}"
+                            return f"{m:d}:{s:02d}"
+                        except Exception:
+                            return "Unknown"
+                    for it in meta.get('items', []):
+                        lines.append(f"{it['position']}. {it['title']} ({_fmt(it.get('duration'))})")
+                await ctx.send("\n".join(lines))
+                return
+
+            if sub == "list":
+                rows = await playlists.list_playlists_for_user(str(ctx.author.id))
+                if not rows:
+                    await ctx.send("No playlists found.")
+                    return
+                lines = [f"{r['name']} (owner: {r['owner_id']}, visibility: {r['visibility']})" for r in rows]
+                await ctx.send("\n".join(lines))
+                return
+
+            if sub == "edit":
+                if len(args) < 4:
+                    await ctx.send("Usage: !playlist edit <playlist name> name <new name>  OR  !playlist edit <playlist name> visibility <public|private>")
+                    return
+                pname = args[1]
+                op = args[2].lower()
+                if op == "name":
+                    newname = " ".join(args[3:]).strip()
+                    ok = await playlists.edit_playlist(str(ctx.author.id), pname, new_name=newname)
+                    if ok:
+                        await ctx.send(f"Renamed playlist '{pname}' -> '{newname}'")
+                    else:
+                        await ctx.send("Edit failed. Are you the owner and does the playlist exist?")
+                    return
+                if op == "visibility":
+                    val = args[3].lower()
+                    if val not in ("public", "private"):
+                        await ctx.send("visibility must be 'public' or 'private'")
+                        return
+                    ok = await playlists.edit_playlist(str(ctx.author.id), pname, visibility=val)
+                    if ok:
+                        await ctx.send(f"Updated visibility for '{pname}' -> {val}")
+                    else:
+                        await ctx.send("Edit failed. Are you the owner and does the playlist exist?")
+                    return
+
+            if sub == "delete":
+                if len(args) < 2:
+                    await ctx.send("Usage: !playlist delete <playlist name>")
+                    return
+                pname = " ".join(args[1:]).strip()
+                ok = await playlists.delete_playlist(str(ctx.author.id), pname)
+                if ok:
+                    await ctx.send(f"Deleted playlist '{pname}'.")
+                else:
+                    await ctx.send("Delete failed. Are you the owner and does the playlist exist?")
+                return
+
+            if sub == "play":
+                if len(args) < 2:
+                    await ctx.send("Usage: !playlist play <playlist name>")
+                    return
+                pname = " ".join(args[1:]).strip()
+                meta = await playlists.view_playlist(str(ctx.author.id), pname)
+                if not meta:
+                    await ctx.send(f"Playlist '{pname}' not found or not visible.")
+                    return
+                player = bot.get_player(ctx.guild)
+                # ensure connected
+                if (not player.voice_client or not player.voice_client.is_connected()) and ctx.author.voice and ctx.author.voice.channel:
+                    try:
+                        player.voice_client = await ctx.author.voice.channel.connect()
+                    except Exception:
+                        pass
+                count = 0
+                for it in meta.get('items', []):
+                    tr = Track(title=it.get('title') or 'Unknown', source_url=it.get('source_url'), webpage_url=it.get('webpage_url'), duration=it.get('duration'), is_live=bool(it.get('is_live', False)))
+                    await player.enqueue(tr)
+                    count += 1
+                await ctx.send(f"Enqueued {count} items from playlist '{pname}'.")
+                return
+
+            await ctx.send(f"Unknown subcommand: {sub}")
+        except Exception as e:
+            logger.exception("Playlist command failed")
+            await ctx.send(f"Playlist command error: {e}")
+
+    bot.add_command(commands.Command(playlist_cmd, name="playlist"))
+
+    # UI menu command: send the MainMenuView (persistent view registered below)
+    try:
+        from ui import MainMenuView
+
+        async def menu_cmd(ctx: commands.Context):
+            view = MainMenuView(bot, timeout=None)
+            emb = discord.Embed(title="Music Controls", description="Open the player controls below.")
+            await ctx.send(embed=emb, view=view)
+
+        bot.add_command(commands.Command(menu_cmd, name="menu"))
+        bot.add_command(commands.Command(menu_cmd, name="player"))
+
+        # register persistent view so component callbacks remain valid across restarts
+        try:
+            bot.add_view(MainMenuView(bot, timeout=None))
+            try:
+                from ui import PlaylistBrowserView
+                # register a default browser view to preserve component callbacks across restarts
+                bot.add_view(PlaylistBrowserView(bot, owner_id="0", timeout=None))
+            except Exception:
+                pass
+        except Exception:
+            # ignore failures to register persistent view (older runtimes)
+            pass
+    except Exception as e:
+        # If UI failed to import, log the error and register a fallback command so users get feedback
+        logger.exception("Failed to import UI module; UI commands unavailable")
+
+        async def fallback_menu(ctx: commands.Context):
+            await ctx.send("UI commands are currently unavailable. Check the bot logs for import errors.")
+
+        bot.add_command(commands.Command(fallback_menu, name="menu"))
+        bot.add_command(commands.Command(fallback_menu, name="player"))
 
     return bot
 

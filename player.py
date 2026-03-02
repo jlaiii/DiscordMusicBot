@@ -19,6 +19,20 @@ import discord
 import yt_dlp  # type: ignore
 from worker import download_to_file
 
+
+class _YTDLLogger:
+    def debug(self, msg):
+        return
+
+    def info(self, msg):
+        return
+
+    def warning(self, msg):
+        return
+
+    def error(self, msg):
+        return
+
 FFMPEG_BEFORE_OPTS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
 FFMPEG_OPTIONS = "-vn"
 
@@ -75,7 +89,14 @@ async def yt_dlp_get_url(query: str, max_results: int = 1, exclude_webpage: str 
         if has_deno:
             ydl_opts["jsruntimes"] = "deno"
         import sys, io
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        # Some environments may provide a YoutubeDL implementation that does not accept
+        # the `logger` keyword (e.g., older youtube_dl forks). Try to pass the logger
+        # but fall back to constructing without it on TypeError.
+        try:
+            ydl_ctx = yt_dlp.YoutubeDL(ydl_opts, logger=_YTDLLogger())
+        except TypeError:
+            ydl_ctx = yt_dlp.YoutubeDL(ydl_opts)
+        with ydl_ctx as ydl:
             old_out, old_err = sys.stdout, sys.stderr
             sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
             try:
@@ -177,7 +198,11 @@ async def yt_dlp_get_candidates(query: str, max_results: int = 10, exclude_webpa
         if has_deno:
             ydl_opts["jsruntimes"] = "deno"
         import sys, io
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        try:
+            ydl_ctx = yt_dlp.YoutubeDL(ydl_opts, logger=_YTDLLogger())
+        except TypeError:
+            ydl_ctx = yt_dlp.YoutubeDL(ydl_opts)
+        with ydl_ctx as ydl:
             old_out, old_err = sys.stdout, sys.stderr
             sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
             try:
@@ -250,6 +275,11 @@ class MusicPlayer:
         self._failed_queries_file = FAILED_QUERIES_FILE
         # autoplay genre/category if set by command (e.g. 'hip hop')
         self.autoplay_genre: str | None = None
+        # newer UI sets `autoplay_mode` (e.g. 'hiphop' or 'custom:<query>')
+        # keep for backward compatibility with older code that used `autoplay_genre`.
+        self.autoplay_mode: str | None = None
+        # whether the current autoplay selection originated from the 247 Autoplay UI
+        self.autoplay_from_247: bool = False
         try:
             if os.path.exists(self._history_file):
                 with open(self._history_file, "r", encoding="utf-8") as _hf:
@@ -293,6 +323,47 @@ class MusicPlayer:
         if not self.ffmpeg:
             logging.getLogger(__name__).warning("ffmpeg not found on PATH; playback will fail until ffmpeg is installed")
         os.makedirs("tmp_audio", exist_ok=True)
+
+    async def _autoplay_advance(self):
+        """Try to advance autoplay immediately after a stream ends.
+
+        This will attempt to fill the autoplay buffer and enqueue the next
+        available candidate (preferring buffered items), or fall back to a
+        direct pick.
+        """
+        if not getattr(self, 'autoplay', False):
+            return
+        # if there are queued items or currently playing, do nothing
+        try:
+            if not self.queue.empty() or self.is_playing():
+                return
+        except Exception:
+            pass
+
+        try:
+            # try to fill buffer quickly
+            try:
+                await self.fill_autoplay_buffer(5)
+            except Exception:
+                logger.exception("Autoplay advance: fill_autoplay_buffer failed")
+
+            if self.autoplay_buffer:
+                nt = self.autoplay_buffer.popleft()
+                try:
+                    await self.enqueue(nt)
+                    return
+                except Exception:
+                    logger.exception("Autoplay advance: failed to enqueue buffered track")
+
+            # final fallback: pick directly
+            try:
+                nt = await self.pick_autoplay_track(self.last_played)
+                if nt:
+                    await self.enqueue(nt)
+            except Exception:
+                logger.exception("Autoplay advance: pick_autoplay_track failed")
+        except Exception:
+            logger.exception("Autoplay advance unexpected error")
 
     def _record_play(self, track: Track):
         """Record the last played track and remember a key to avoid immediate repeats."""
@@ -388,9 +459,9 @@ class MusicPlayer:
                                 elapsed = time.time() - start_ts
                                 if t.duration and t.duration > 0:
                                     pct = min(100.0, (elapsed / t.duration) * 100.0)
-                                    logger.info("[guild %s] Playing '%s' elapsed=%.1fs / %.1fs (%.1f%%)", self.guild.id, t.title, elapsed, t.duration, pct)
+                                    logger.debug("[guild %s] Playing '%s' elapsed=%.1fs / %.1fs (%.1f%%)", self.guild.id, t.title, elapsed, t.duration, pct)
                                 else:
-                                    logger.info("[guild %s] Playing '%s' elapsed=%.1fs", self.guild.id, t.title, elapsed)
+                                    logger.debug("[guild %s] Playing '%s' elapsed=%.1fs", self.guild.id, t.title, elapsed)
                                 await asyncio.sleep(interval)
                         except asyncio.CancelledError:
                             return
@@ -403,6 +474,11 @@ class MusicPlayer:
                             logger.error("Local playback error: %s", err)
                         # do not remove prefetched file
                         self.bot.loop.call_soon_threadsafe(self.next_event.set)
+                        try:
+                            # attempt to advance autoplay immediately
+                            self.bot.loop.create_task(self._autoplay_advance())
+                        except Exception:
+                            pass
 
                     self.voice_client.play(source, after=_after_local_prefetched)
                     await self.next_event.wait()
@@ -439,6 +515,10 @@ class MusicPlayer:
                         if err:
                             logger.error("Player error: %s", err)
                         self.bot.loop.call_soon_threadsafe(self.next_event.set)
+                        try:
+                            self.bot.loop.create_task(self._autoplay_advance())
+                        except Exception:
+                            pass
 
                     # start progress monitor for streamed playback
                     async def _play_progress_monitor_stream(t: Track, start_ts: float):
@@ -448,9 +528,9 @@ class MusicPlayer:
                                 elapsed = time.time() - start_ts
                                 if t.duration and t.duration > 0:
                                     pct = min(100.0, (elapsed / t.duration) * 100.0)
-                                    logger.info("[guild %s] Streaming '%s' elapsed=%.1fs / %.1fs (%.1f%%)", self.guild.id, t.title, elapsed, t.duration, pct)
+                                    logger.debug("[guild %s] Streaming '%s' elapsed=%.1fs / %.1fs (%.1f%%)", self.guild.id, t.title, elapsed, t.duration, pct)
                                 else:
-                                    logger.info("[guild %s] Streaming '%s' elapsed=%.1fs", self.guild.id, t.title, elapsed)
+                                    logger.debug("[guild %s] Streaming '%s' elapsed=%.1fs", self.guild.id, t.title, elapsed)
                                 await asyncio.sleep(interval)
                         except asyncio.CancelledError:
                             return
@@ -503,7 +583,11 @@ class MusicPlayer:
                         ydl_opts["jsruntimes"] = "deno"
 
                     import sys, io
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    try:
+                        ydl_ctx = yt_dlp.YoutubeDL(ydl_opts, logger=_YTDLLogger())
+                    except TypeError:
+                        ydl_ctx = yt_dlp.YoutubeDL(ydl_opts)
+                    with ydl_ctx as ydl:
                         # prefer using the original webpage URL when available
                         url_to_download = track.webpage_url or track.source_url
                         old_out, old_err = sys.stdout, sys.stderr
@@ -598,6 +682,10 @@ class MusicPlayer:
                     except Exception:
                         pass
                     self.bot.loop.call_soon_threadsafe(self.next_event.set)
+                    try:
+                        self.bot.loop.create_task(self._autoplay_advance())
+                    except Exception:
+                        pass
 
                 # start monitor for local playback
                 async def _play_progress_monitor_file(t: Track, start_ts: float):
@@ -607,9 +695,9 @@ class MusicPlayer:
                             elapsed = time.time() - start_ts
                             if t.duration and t.duration > 0:
                                 pct = min(100.0, (elapsed / t.duration) * 100.0)
-                                logger.info("[guild %s] Playing file '%s' elapsed=%.1fs / %.1fs (%.1f%%)", self.guild.id, t.title, elapsed, t.duration, pct)
+                                logger.debug("[guild %s] Playing file '%s' elapsed=%.1fs / %.1fs (%.1f%%)", self.guild.id, t.title, elapsed, t.duration, pct)
                             else:
-                                logger.info("[guild %s] Playing file '%s' elapsed=%.1fs", self.guild.id, t.title, elapsed)
+                                logger.debug("[guild %s] Playing file '%s' elapsed=%.1fs", self.guild.id, t.title, elapsed)
                             await asyncio.sleep(interval)
                     except asyncio.CancelledError:
                         return
@@ -648,61 +736,15 @@ class MusicPlayer:
     async def enqueue(self, track: Track):
         await self.queue.put(track)
         logger.info("Enqueued track for guild %s: %s (prefetched=%s, live=%s)", self.guild.id, track.title, track.prefetched, track.is_live)
-        # ensure a few upcoming tracks are prefetched so playback is smooth
-        try:
-            await self.ensure_prefetch_ahead(6)
-        except Exception:
-            logger.exception("ensure_prefetch_ahead failed in enqueue")
-        # start background prefetch for this track if possible
-        # start a prefetch for this specific track as well
-        try:
-            await self.start_prefetch_for_track(track)
-        except Exception:
-            logger.exception("start_prefetch_for_track failed in enqueue")
+        # prefetch disabled: enqueue will not trigger background downloads
 
     async def start_prefetch_for_track(self, track: Track):
         """Start a background prefetch for a single track (idempotent).
 
         Safe to call multiple times; will not duplicate work for same URL.
         """
-        # choose a download query that yt_dlp can use reliably:
-        # prefer webpage_url when available, otherwise fall back to a search by title
-        download_query = None
-        if track.webpage_url:
-            download_query = track.webpage_url
-        elif track.source_url and ("youtube.com" in track.source_url or "youtu.be" in track.source_url):
-            download_query = track.source_url
-        elif track.title:
-            download_query = f"ytsearch1:{track.title}"
-
-        if not download_query:
-            return
-        # do not prefetch live streams (they cannot be downloaded reliably)
-        if getattr(track, "is_live", False):
-            return
-        key = download_query
-        # avoid duplicate prefetches for same key
-        if key in self._prefetch_tasks and not self._prefetch_tasks[key].done():
-            return key
-
-        async def _do_prefetch(u: str, t: Track):
-            logger.info("Prefetch task started for %s (key=%s)", getattr(t, 'title', '<unknown>'), u)
-            try:
-                filename = await asyncio.to_thread(download_to_file, u, "tmp_audio")
-                if filename and os.path.exists(filename):
-                    t.filename = filename
-                    t.prefetched = True
-                    logger.info("Prefetched %s -> %s", u, filename)
-                else:
-                    logger.info("Prefetch did not produce a file for %s", u)
-            except Exception:
-                logger.exception("Prefetch failed for %s", u)
-            finally:
-                logger.info("Prefetch task finished for %s (key=%s)", getattr(t, 'title', '<unknown>'), u)
-
-        task = self.bot.loop.create_task(_do_prefetch(key, track))
-        self._prefetch_tasks[key] = task
-        return key
+        # Prefetching disabled globally for autoplay/24/7: no-op
+        return None
 
     async def ensure_prefetch_ahead(self, ahead: int = 6):
         """Ensure the next `ahead` tracks in the queue are being prefetched.
@@ -710,24 +752,8 @@ class MusicPlayer:
         This scans the internal queue and triggers `start_prefetch_for_track`
         for the first `ahead` items.
         """
-        try:
-            # access underlying deque of the asyncio.Queue
-            items = list(self.queue._queue)
-            logger.debug("ensure_prefetch_ahead: planning to prefetch %d items (queue size=%d)", min(ahead, len(items)), len(items))
-        except Exception:
-            return
-        count = 0
-        for item in items:
-            if not isinstance(item, Track):
-                continue
-            try:
-                logger.debug("ensure_prefetch_ahead: starting prefetch for queue item %s", getattr(item, 'title', '<unknown>'))
-                await self.start_prefetch_for_track(item)
-            except Exception:
-                logger.exception("ensure_prefetch_ahead: failed prefetch for one item")
-            count += 1
-            if count >= ahead:
-                break
+        # Prefetching disabled globally: no-op
+        return
 
     async def fill_autoplay_buffer(self, target: int = 5):
         """Fill the autoplay buffer with prefetched tracks up to `target`.
@@ -741,9 +767,7 @@ class MusicPlayer:
             return
 
         async def _fill():
-            # seed for the next pick should be the last actual played track
             seed = self.last_played
-            tried_keys: set[str] = set()
             attempts = 0
             max_attempts = max(50, target * 10)
             while len(self.autoplay_buffer) < target and attempts < max_attempts:
@@ -753,51 +777,24 @@ class MusicPlayer:
                     logger.exception("fill_autoplay_buffer: pick_autoplay_track failed")
                     break
                 if not cand:
-                    break
-                url = cand.webpage_url or cand.source_url or cand.title
-                if not url:
-                    break
-                key = url
-                # avoid retrying the same failing candidate repeatedly
-                if key in tried_keys:
-                    attempts += 1
-                    await asyncio.sleep(0.05)
-                    continue
-                try:
-                    key = await self.start_prefetch_for_track(cand)
-                    task = self._prefetch_tasks.get(key) if key else None
-                    if task:
-                        try:
-                            await asyncio.wait_for(task, timeout=60)
-                        except Exception:
-                            logger.info("Autoplay prefetch timed out or failed for %s", key)
-                    # only append if file exists
-                    if cand.filename and os.path.exists(cand.filename):
-                        cand.prefetched = True
-                        self.autoplay_buffer.append(cand)
-                        # advance seed so next suggestion is related
-                        seed = cand
-                    else:
-                        # record failed candidate and try another
-                        tried_keys.add(key)
-                        seed = seed or cand
-                        attempts += 1
-                        await asyncio.sleep(0.1)
-                        continue
-                except Exception:
-                    logger.exception("Autoplay prefetch error for %s", url)
-                    # mark this candidate as tried and continue
-                    tried_keys.add(key)
                     attempts += 1
                     await asyncio.sleep(0.1)
                     continue
+                # accept candidate if it appears usable (live or has a URL)
+                if not (getattr(cand, 'source_url', None) or getattr(cand, 'webpage_url', None) or getattr(cand, 'is_live', False)):
+                    attempts += 1
+                    await asyncio.sleep(0.1)
+                    continue
+                cand.prefetched = False
+                self.autoplay_buffer.append(cand)
+                seed = cand
             if attempts >= max_attempts:
-                logger.info("Autoplay fill aborted after %d attempts (target=%d)", attempts, target)
+                logger.debug("Autoplay fill aborted after %d attempts (target=%d)", attempts, target)
+
         self._autoplay_fill_task = self.bot.loop.create_task(_fill())
         try:
             await self._autoplay_fill_task
         except Exception:
-            # swallow exceptions, they are already logged
             pass
 
     async def ensure_autoplay_ready(self, min_prefetched: int = 1, timeout: float = 10.0) -> bool:
@@ -807,7 +804,6 @@ class MusicPlayer:
         """
         if len(self.autoplay_buffer) >= min_prefetched:
             return True
-        # trigger a fill if not already running
         try:
             if not self._autoplay_fill_task or self._autoplay_fill_task.done():
                 self._autoplay_fill_task = self.bot.loop.create_task(self.fill_autoplay_buffer(max(min_prefetched, 5)))
@@ -827,6 +823,14 @@ class MusicPlayer:
         Returns a new Track or None if no candidate found.
         """
         try:
+            # If the UI set a custom autoplay query, prefer it over using the last
+            # played track's title as the seed. This avoids using the possibly
+            # non-music title of the initial custom-resolved track as the basis
+            # for subsequent suggestions.
+            if isinstance(self.autoplay_mode, str) and self.autoplay_mode.startswith("custom:"):
+                logger.info("Autoplay: using custom mode query instead of last_track seed")
+                last_track = None
+
             def _norm(s: str | None) -> str:
                 if not s:
                     return ""
@@ -836,6 +840,144 @@ class MusicPlayer:
                 if m:
                     return m.group(1)
                 return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", s))
+
+            # If a specific autoplay genre is set (non-custom), prefer live 24/7 streams.
+            LIVE_MODES = {
+                        "chill",
+                        "lofi",
+                        "rock",
+                        "pop",
+                        "hiphop",
+                        "electronic",
+                        "jazz",
+                        "classical",
+                        "metal",
+                        "indie",
+                        "ambient",
+                        "reggae",
+                        "blues",
+                        "country",
+                        "house",
+                        "dnb",
+                        "synthwave",
+                        "funk",
+                        # additional modes to support live/24/7 searches
+                        "christmas",
+                        "thanksgiving",
+                        "elevator",
+                        "workout",
+                        "sleep",
+                        "spa",
+                        "instrumental",
+                        "orchestral",
+                        "soundtrack",
+                        "videogame",
+                        "kpop",
+                        "latin",
+                        "reggaeton",
+                        "disco",
+                        "party",
+                        "throwback",
+                        "oldies",
+                        "eighties",
+                        "nineties",
+                        "acoustic",
+                        "gospel",
+                    }
+
+            live_category = None
+            # If the selection came from the 247 Autoplay menu, always treat it as a live category
+            if getattr(self, 'autoplay_from_247', False) and self.autoplay_genre:
+                live_category = str(self.autoplay_genre).strip()
+            else:
+                if self.autoplay_mode and isinstance(self.autoplay_mode, str) and not self.autoplay_mode.startswith("custom:"):
+                    cand = str(self.autoplay_mode).strip()
+                    if cand in LIVE_MODES:
+                        live_category = cand
+                elif self.autoplay_genre:
+                    cand = str(self.autoplay_genre).strip()
+                    if cand in LIVE_MODES:
+                        live_category = cand
+
+            if live_category:
+                # Build specific queries that target 24/7/live stations for the category
+                qbase = live_category
+                queries = [
+                    f"247 {qbase} live",
+                    f"247 {qbase} 24/7 live",
+                    f"{qbase} 24/7 live",
+                    f"{qbase} hits live",
+                    f"spotify {qbase} live",
+                    f"spotify hits {qbase} live",
+                    f"{qbase} radio live",
+                ]
+                for q in queries:
+                    now = time.time()
+                    f_at = self._failed_queries.get(q)
+                    if f_at and (now - f_at) < FAILED_QUERY_TTL:
+                        continue
+                    try:
+                            candidates = await yt_dlp_get_candidates(q, max_results=max_results)
+                            # Diagnostic: log candidate details to help debug non-live selections
+                            try:
+                                for idx, (stream_url, title, webpage_url, is_live, duration) in enumerate(candidates):
+                                    logger.debug("Autoplay live-query candidate[%d] q=%s title=%s is_live=%s duration=%s stream_url=%s webpage_url=%s", idx, q, title, is_live, duration, bool(stream_url), webpage_url)
+                            except Exception:
+                                pass
+                    except Exception:
+                        try:
+                            self._failed_queries[q] = now
+                            self.bot.loop.create_task(asyncio.to_thread(self._save_failed_queries_sync))
+                        except Exception:
+                            pass
+                        continue
+                    if not candidates:
+                        try:
+                            self._failed_queries[q] = now
+                            self.bot.loop.create_task(asyncio.to_thread(self._save_failed_queries_sync))
+                        except Exception:
+                            pass
+                        continue
+
+                    # prefer live candidates explicitly; skip ones we recently played
+                    for stream_url, title, webpage_url, is_live, duration in candidates:
+                        # Require a direct stream URL for live autoplay candidates.
+                        # Webpage-only entries (no direct stream_url) often point to VODs
+                        # or pages that will be downloaded as non-live recordings —
+                        # skip those to ensure we only enqueue actual live streams.
+                        if not stream_url:
+                            logger.debug("Autoplay live candidate skipped (no direct stream URL): %s", title)
+                            continue
+                        if not is_live:
+                            continue
+                        # Heuristic: if yt-dlp reports a duration, it's likely not a true live stream
+                        if duration and duration > 0:
+                            logger.debug("Autoplay live candidate skipped (has duration=%.1f): %s", duration, title)
+                            continue
+                        # Avoid immediate repeats: skip candidates present in recent history
+                        cand_key = (webpage_url or stream_url or title) or ""
+                        norm_cand = _norm(cand_key)
+                        if norm_cand:
+                            dup = False
+                            for h in list(self.play_history):
+                                if _norm(h) and _norm(h) == norm_cand:
+                                    dup = True
+                                    break
+                            if not dup:
+                                for h in self._persisted_history.get(str(self.guild.id), []):
+                                    if _norm(h) and _norm(h) == norm_cand:
+                                        dup = True
+                                        break
+                            if not dup and self.last_played:
+                                if _norm(self.last_played.webpage_url or self.last_played.source_url or self.last_played.title) == norm_cand:
+                                    dup = True
+                            if dup:
+                                continue
+                        # allow using the direct stream URL even if it equals the webpage URL
+                        chosen_source = stream_url if stream_url else None
+                        return Track(title=title or qbase, source_url=chosen_source, webpage_url=webpage_url, is_live=True, duration=duration)
+                # no live candidate found for configured queries
+                return None
 
             # Try multiple attempts to pick a candidate different from recent history
             if last_track and last_track.title:
@@ -968,7 +1110,16 @@ class MusicPlayer:
                 return len(inter) / max(len(wa), len(wb))
 
             # Build a wider list of queries with variations to increase chance of diverse picks
-            if self.autoplay_genre:
+            # prefer UI-provided `autoplay_mode` when available; it may contain
+            # either a genre like 'hiphop' or a custom query prefixed with 'custom:'.
+            if self.autoplay_mode:
+                if isinstance(self.autoplay_mode, str) and self.autoplay_mode.startswith("custom:"):
+                    q = self.autoplay_mode.split(":", 1)[1]
+                    try_queries = [q]
+                else:
+                    g = self.autoplay_mode
+                    try_queries = [g, f"{g} mix", f"{g} playlist", f"best {g} songs", f"{g} hits"]
+            elif self.autoplay_genre:
                 g = self.autoplay_genre
                 try_queries = [g, f"{g} mix", f"{g} playlist", f"best {g} songs", f"{g} hits"]
             else:
@@ -1060,7 +1211,7 @@ class MusicPlayer:
                 except Exception:
                     pass
 
-            logger.info("Autoplay: no suitable fallback candidate found after genre queries")
+            logger.debug("Autoplay: no suitable fallback candidate found after genre queries")
             return None
         except Exception:
             logger.exception("pick_autoplay_track error")
