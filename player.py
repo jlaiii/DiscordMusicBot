@@ -841,6 +841,19 @@ class MusicPlayer:
                     return m.group(1)
                 return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", s))
 
+            def _title_has_live_token(title: str | None) -> bool:
+                if not title:
+                    return False
+                t = title.lower()
+                if re.search(r"\blive\b", t):
+                    return True
+                if "24/7" in t or "247" in t:
+                    return True
+                # explicit phrases
+                if "live radio" in t or "live:" in t or "live:" in t:
+                    return True
+                return False
+
             # If a specific autoplay genre is set (non-custom), prefer live 24/7 streams.
             # Reduce supported live categories to the curated set requested by user
             LIVE_MODES = {
@@ -974,11 +987,27 @@ class MusicPlayer:
                                     dup = True
                             if dup:
                                 continue
+                        # enforce title contains a required live token before accepting
+                        if not _title_has_live_token(title):
+                            logger.debug("Autoplay live candidate skipped (title missing required token): %s", title)
+                            continue
                         # allow using the direct stream URL even if it equals the webpage URL
                         chosen_source = stream_url if stream_url else None
                         return Track(title=title or qbase, source_url=chosen_source, webpage_url=webpage_url, is_live=True, duration=duration)
                 # no live candidate found for configured queries
                 return None
+
+            # Determine whether the current autoplay selection requires live/24/7 titles
+            require_live_title = False
+            try:
+                if getattr(self, 'autoplay_from_247', False):
+                    require_live_title = True
+                if isinstance(self.autoplay_mode, str) and self.autoplay_mode in LIVE_MODES:
+                    require_live_title = True
+                if getattr(self, 'autoplay_genre', None) and self.autoplay_genre in LIVE_MODES:
+                    require_live_title = True
+            except Exception:
+                pass
 
             # Try multiple attempts to pick a candidate different from recent history
             if last_track and last_track.title:
@@ -1087,6 +1116,16 @@ class MusicPlayer:
 
                     if picked:
                         stream_url, title, webpage_url, is_live, duration = picked
+                        # enforce live-title requirement if configured
+                        if require_live_title and not _title_has_live_token(title):
+                            logger.debug("Autoplay candidate skipped due to missing live token (require_live_title=true): %s", title)
+                            try:
+                                self._failed_queries[q] = now
+                                self.bot.loop.create_task(asyncio.to_thread(self._save_failed_queries_sync))
+                            except Exception:
+                                pass
+                            await asyncio.sleep(0.05)
+                            continue
                         chosen_source = stream_url if (stream_url and stream_url != webpage_url) else None
                         return Track(title=title or last_track.title, source_url=chosen_source, webpage_url=webpage_url, is_live=is_live, duration=duration)
                     # no acceptable candidates for this query -> mark as failed
@@ -1203,6 +1242,15 @@ class MusicPlayer:
 
                 if picked:
                     stream_url, title, webpage_url, is_live, duration = picked
+                    # enforce live-title requirement for fallback selections as well
+                    if require_live_title and not _title_has_live_token(title):
+                        logger.debug("Autoplay fallback candidate skipped (missing live token): %s", title)
+                        try:
+                            self._failed_queries[q] = now
+                            self.bot.loop.create_task(asyncio.to_thread(self._save_failed_queries_sync))
+                        except Exception:
+                            pass
+                        continue
                     logger.info("Autoplay fallback: selected '%s' from query '%s'", title, q)
                     chosen_source = stream_url if (stream_url and stream_url != webpage_url) else None
                     return Track(title=title or "Autoplay", source_url=chosen_source, webpage_url=webpage_url, is_live=is_live, duration=duration)
