@@ -651,8 +651,9 @@ class AutoplayButtonView(ui.View):
     Use this from text commands so the message contains a button; clicking the button
     is an interaction and can open the ephemeral `AutoPlayMenuView` for the user.
     """
-    def __init__(self, bot):
-        super().__init__(timeout=None)
+    def __init__(self, bot, timeout: Optional[float] = None):
+        # allow timeout to be passed when registering persistently
+        super().__init__(timeout=timeout)
         self.bot = bot
 
     @ui.button(label="Open Autoplay", style=discord.ButtonStyle.secondary, custom_id="dmbot:open_autoplay_btn")
