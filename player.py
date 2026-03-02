@@ -842,48 +842,26 @@ class MusicPlayer:
                 return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", s))
 
             # If a specific autoplay genre is set (non-custom), prefer live 24/7 streams.
+            # Reduce supported live categories to the curated set requested by user
             LIVE_MODES = {
-                        "chill",
-                        "lofi",
-                        "rock",
-                        "pop",
-                        "hiphop",
-                        "electronic",
-                        "jazz",
-                        "classical",
-                        "metal",
-                        "indie",
-                        "ambient",
-                        "reggae",
-                        "blues",
-                        "country",
-                        "house",
-                        "dnb",
-                        "synthwave",
-                        "funk",
-                        # additional modes to support live/24/7 searches
-                        "christmas",
-                        "thanksgiving",
-                        "elevator",
-                        "workout",
-                        "sleep",
-                        "spa",
-                        "instrumental",
-                        "orchestral",
-                        "soundtrack",
-                        "videogame",
-                        "kpop",
-                        "latin",
-                        "reggaeton",
-                        "disco",
-                        "party",
-                        "throwback",
-                        "oldies",
-                        "eighties",
-                        "nineties",
-                        "acoustic",
-                        "gospel",
-                    }
+                "rockclassics",
+                "rock",
+                "praise",
+                "worship",
+                "bestradio",
+                "jazz",
+                "worldnews",
+                "podcasts",
+                # user-requested additions
+                "christmas",
+                "chill",
+                "relaxing",
+                "dnb",
+                "rainy",
+                "deephouse",
+                # top curated popular 24/7 searches
+                "top247",
+            }
 
             live_category = None
             # If the selection came from the 247 Autoplay menu, always treat it as a live category
@@ -902,15 +880,33 @@ class MusicPlayer:
             if live_category:
                 # Build specific queries that target 24/7/live stations for the category
                 qbase = live_category
-                queries = [
-                    f"247 {qbase} live",
-                    f"247 {qbase} 24/7 live",
-                    f"{qbase} 24/7 live",
-                    f"{qbase} hits live",
-                    f"spotify {qbase} live",
-                    f"spotify hits {qbase} live",
-                    f"{qbase} radio live",
-                ]
+                # Special curated top-24/7 queries when requested
+                if qbase == "top247":
+                    queries = [
+                        "24/7 lofi hip hop radio",
+                        "lofi hip hop 24/7",
+                        "24/7 lo-fi beats to relax/study to",
+                        "lofi girl 24/7",
+                        "24/7 chillhop radio",
+                        "24/7 deep house live",
+                        "deep house 24/7 live",
+                        "24/7 jazz radio",
+                        "24/7 classical music live",
+                        "rain sounds 24/7",
+                        "news 24/7 live",
+                        "24/7 podcasts live",
+                        "24/7 radio live",
+                    ]
+                else:
+                    queries = [
+                        f"247 {qbase} live",
+                        f"247 {qbase} 24/7 live",
+                        f"{qbase} 24/7 live",
+                        f"{qbase} hits live",
+                        f"spotify {qbase} live",
+                        f"spotify hits {qbase} live",
+                        f"{qbase} radio live",
+                    ]
                 for q in queries:
                     now = time.time()
                     f_at = self._failed_queries.get(q)
@@ -947,6 +943,11 @@ class MusicPlayer:
                         # skip those to ensure we only enqueue actual live streams.
                         if not stream_url:
                             logger.debug("Autoplay live candidate skipped (no direct stream URL): %s", title)
+                            continue
+                        # Require that the title explicitly indicates a live/24/7 stream
+                        t = (title or "").lower()
+                        if not (re.search(r"\blive\b", t) or "247" in t or "24/7" in t):
+                            logger.debug("Autoplay live candidate skipped (title missing live/247): %s", title)
                             continue
                         if not is_live:
                             continue
