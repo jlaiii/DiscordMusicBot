@@ -342,6 +342,18 @@ class AutoPlayMenuView(ui.View):
                         player.autoplay_from_247 = False
                     except Exception:
                         pass
+                # Clear any prefetched/autoplay buffer from previous selection
+                try:
+                    if getattr(player, 'autoplay_buffer', None):
+                        player.autoplay_buffer.clear()
+                    if getattr(player, '_autoplay_fill_task', None):
+                        try:
+                            player._autoplay_fill_task.cancel()
+                        except Exception:
+                            pass
+                        player._autoplay_fill_task = None
+                except Exception:
+                    pass
                 else:
                     player.autoplay_genre = sel
                     player.autoplay_mode = None
@@ -349,6 +361,18 @@ class AutoPlayMenuView(ui.View):
                         player.autoplay_from_247 = True
                     except Exception:
                         pass
+                # Clear any prefetched/autoplay buffer from previous selection
+                try:
+                    if getattr(player, 'autoplay_buffer', None):
+                        player.autoplay_buffer.clear()
+                    if getattr(player, '_autoplay_fill_task', None):
+                        try:
+                            player._autoplay_fill_task.cancel()
+                        except Exception:
+                            pass
+                        player._autoplay_fill_task = None
+                except Exception:
+                    pass
             except Exception:
                 pass
             # Try to start autoplay immediately by applying selection and starting playback.
@@ -435,6 +459,19 @@ class AutoPlayMenuView(ui.View):
             else:
                 player.autoplay_genre = sel
                 player.autoplay_mode = None
+        except Exception:
+            pass
+
+        # Clear any existing autoplay buffer so the new selection is used
+        try:
+            if getattr(player, 'autoplay_buffer', None):
+                player.autoplay_buffer.clear()
+            if getattr(player, '_autoplay_fill_task', None):
+                try:
+                    player._autoplay_fill_task.cancel()
+                except Exception:
+                    pass
+                player._autoplay_fill_task = None
         except Exception:
             pass
 
@@ -599,6 +636,18 @@ class AutoPlayMenuView(ui.View):
             mode = player.autoplay_mode
         player.autoplay = True
         player.autoplay_mode = mode
+        # clear any previously-prefetched autoplay buffer so new mode takes effect
+        try:
+            if getattr(player, 'autoplay_buffer', None):
+                player.autoplay_buffer.clear()
+            if getattr(player, '_autoplay_fill_task', None):
+                try:
+                    player._autoplay_fill_task.cancel()
+                except Exception:
+                    pass
+                player._autoplay_fill_task = None
+        except Exception:
+            pass
         # try to join voice if possible
         if (not player.voice_client or not player.voice_client.is_connected()) and interaction.user.voice and interaction.user.voice.channel:
             try:

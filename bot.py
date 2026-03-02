@@ -71,6 +71,17 @@ class ControllerBot(commands.Bot):
         except Exception:
             # UI may not be available yet; ignore
             pass
+        # register the full Autoplay menu view so the select/menu survives restarts
+        try:
+            from ui import AutoPlayMenuView
+            try:
+                self.add_view(AutoPlayMenuView(self, timeout=None))
+                logger.info("Registered persistent AutoPlayMenuView")
+            except Exception:
+                logger.exception("Failed to register AutoPlayMenuView persistently")
+        except Exception:
+            # UI may not be available yet; ignore
+            pass
         
 
     def get_player(self, guild: discord.Guild) -> MusicPlayer:
