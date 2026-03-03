@@ -6,13 +6,6 @@ Commands:
 
 - !skip or !next
   Skip the currently playing track.
-
-- !autoplay [genre]
-  Toggle autoplay. If you provide a genre, autoplay will be enabled and biased toward that genre.
-  Examples:
-    !autoplay            -> toggles autoplay on/off
-    !autoplay hip hop    -> enables autoplay and biases toward "hip hop"
-
 - !pause
   Pause current playback.
 
@@ -32,16 +25,10 @@ Commands:
   Sends this HELP.txt file to the channel.
 
 Notes & configuration:
-- Autoplay keeps a persistent per-guild recent-play history to avoid repeats; stored in the bot directory as a JSON file (default: autoplay_history.json).
-- Failed search queries are cached temporarily (default TTL 300s) in autoplay_failed.json to avoid repeat failures.
 - Environment variables (optional):
-    DMBOT_AUTOPLAY_HISTORY_FILE  - path to history file (default: autoplay_history.json)
-    DMBOT_AUTOPLAY_HISTORY_MAXLEN - how many recent entries to keep per guild (default: 512)
-    DMBOT_AUTOPLAY_FAILED_TTL - seconds to avoid re-querying failing searches (default: 300)
-    DMBOT_AUTOPLAY_FAILED_FILE - path to failed-queries cache (default: autoplay_failed.json)
+  
 
 Behavior notes:
-- The bot attempts to prefetch autoplay tracks; when autoplay is enabled it will try to keep a small buffer of prefetched audio to reduce delays between tracks.
 - If the bot cannot stream a direct media URL for a candidate it will download it first, then play the downloaded file to avoid FFmpeg hanging on webpage URLs.
 
-If you want additional commands (inspect/clear autoplay history, show buffer status, tune thresholds), ask and I can add them.
+If you want additional commands or features, ask and I can add them.

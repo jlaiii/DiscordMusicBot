@@ -59,23 +59,6 @@ class ControllerBot(commands.Bot):
         except Exception:
             # UI may not be available yet; ignore
             pass
-        # register the autoplay-button view so the 'Open Autoplay' / '247 Play' button
-        # remain functional after bot restarts (Discord routes interactions by custom_id)
-        try:
-            from ui import AutoplayButtonView
-            try:
-                self.add_view(AutoplayButtonView(self, timeout=None))
-                logger.info("Registered persistent AutoplayButtonView")
-            except Exception:
-                logger.exception("Failed to register AutoplayButtonView persistently")
-        except Exception:
-            # UI may not be available yet; ignore
-            pass
-        # The full `AutoPlayMenuView` creates dynamic select items at runtime
-        # (without stable `custom_id`s) and therefore cannot be registered as
-        # a persistent view. We intentionally do not add it persistently here
-        # to avoid Discord persistence errors; the smaller `AutoplayButtonView`
-        # remains registered so users can open the menu interactively.
         
 
     def get_player(self, guild: discord.Guild) -> MusicPlayer:
@@ -173,80 +156,7 @@ def create_bot() -> ControllerBot:
             logger.info("Skip requested by %s in guild %s", getattr(ctx.author, 'name', None), ctx.guild.id if ctx.guild else None)
             player.voice_client.stop()
             await ctx.send("Skipped.")
-            # try to advance autoplay immediately if enabled
-            if getattr(player, "autoplay", False):
-                async def _advance():
-                    try:
-                        # attempt to reconnect if disconnected and author in voice
-                        if (not player.voice_client or not player.voice_client.is_connected()) and ctx.author.voice and ctx.author.voice.channel:
-                            try:
-                                player.voice_client = await ctx.author.voice.channel.connect()
-                                player.last_voice_channel_id = ctx.author.voice.channel.id
-                            except Exception:
-                                pass
-                        # If there are queued items, prefer them and do not enqueue autoplay
-                        try:
-                            if not player.queue.empty():
-                                return
-                        except Exception:
-                            pass
-                        # try using buffer or pick and enqueue
-                        await player.fill_autoplay_buffer(5)
-                        if player.autoplay_buffer:
-                            nt = player.autoplay_buffer.popleft()
-                            await player.enqueue(nt)
-                        else:
-                            nt = await player.pick_autoplay_track(player.last_played)
-                            if nt:
-                                await player.enqueue(nt)
-                    except Exception:
-                        logger.exception("Autoplay advance after skip failed")
-
-                bot.loop.create_task(_advance())
-            else:
-                # nothing is playing; if autoplay is on attempt to start next
-                if getattr(player, "autoplay", False):
-                    # If there are queued items, prefer them and do not start autoplay
-                    try:
-                        if not player.queue.empty():
-                            try:
-                                await ctx.send("There are queued tracks — resuming queued playback.")
-                            except Exception:
-                                pass
-                            # ensure voice is connected if possible, then return
-                            if (not player.voice_client or not player.voice_client.is_connected()) and ctx.author.voice and ctx.author.voice.channel:
-                                try:
-                                    player.voice_client = await ctx.author.voice.channel.connect()
-                                    player.last_voice_channel_id = ctx.author.voice.channel.id
-                                except Exception:
-                                    pass
-                            return
-                    except Exception:
-                        pass
-
-                    await ctx.send("Nothing is playing — attempting to resume autoplay.")
-                    async def _start():
-                        try:
-                            if (not player.voice_client or not player.voice_client.is_connected()) and ctx.author.voice and ctx.author.voice.channel:
-                                try:
-                                    player.voice_client = await ctx.author.voice.channel.connect()
-                                    player.last_voice_channel_id = ctx.author.voice.channel.id
-                                except Exception:
-                                    pass
-                            await player.fill_autoplay_buffer(5)
-                            if player.autoplay_buffer:
-                                nt = player.autoplay_buffer.popleft()
-                                await player.enqueue(nt)
-                            else:
-                                nt = await player.pick_autoplay_track(player.last_played)
-                                if nt:
-                                    await player.enqueue(nt)
-                        except Exception:
-                            logger.exception("Autoplay start from skip/no-play failed")
-
-                    bot.loop.create_task(_start())
-                else:
-                    await ctx.send("Nothing is playing.")
+            return
 
     async def _queue(ctx: commands.Context):
         player = bot.get_player(ctx.guild)
@@ -293,21 +203,11 @@ def create_bot() -> ControllerBot:
                 pass
         # fallback: send short inline help
         help_text = (
-            "Commands: !play <query>, !skip, !autoplay [genre], !pause, !resume, !stop, !queue, !help"
+            "Commands: !play <query>, !skip, !pause, !resume, !stop, !queue, !help"
         )
         await ctx.send(help_text)
 
-    async def autoplay_cmd(ctx: commands.Context, *, genre: Optional[str] = None):
-        # Open the autoplay configuration GUI instead of accepting genre via chat
-        try:
-            from ui import AutoplayButtonView
-            view = AutoplayButtonView(bot)
-            try:
-                await ctx.send("Autoplay menu:", view=view)
-            except Exception:
-                await ctx.send("Autoplay must be configured via the Autoplay GUI. Use the '247 Play' button in the main menu.")
-        except Exception:
-            await ctx.send("Autoplay must be configured via the Autoplay GUI. Use the '247 Play' button in the main menu.")
+
 
     # register commands
     bot.add_command(commands.Command(play, name="play"))
@@ -319,7 +219,6 @@ def create_bot() -> ControllerBot:
     bot.add_command(commands.Command(pause, name="pause"))
     bot.add_command(commands.Command(resume, name="resume"))
     bot.add_command(commands.Command(volume, name="volume"))
-    bot.add_command(commands.Command(autoplay_cmd, name="autoplay"))
     async def status_cmd(ctx: commands.Context):
         player = bot.get_player(ctx.guild)
         vc = player.voice_client
@@ -327,8 +226,6 @@ def create_bot() -> ControllerBot:
         status.append(f"Voice connected: {bool(vc and vc.is_connected())}")
         status.append(f"Is playing: {player.is_playing()}")
         status.append(f"Queue size: {player.queue.qsize()}")
-        status.append(f"Autoplay buffer size: {len(player.autoplay_buffer)}")
-        status.append(f"Autoplay enabled: {getattr(player, 'autoplay', False)}")
         status.append(f"Last played: {player.last_played.title if player.last_played else None}")
         await ctx.send("\n".join(status))
     async def nowplaying_cmd(ctx: commands.Context):
@@ -363,6 +260,13 @@ def create_bot() -> ControllerBot:
         await ctx.send("\n".join(parts))
     bot.add_command(commands.Command(status_cmd, name="status"))
     bot.add_command(commands.Command(nowplaying_cmd, name="nowplaying"))
+
+    async def loop_cmd(ctx: commands.Context):
+        """Toggle looping of the current song for this guild's player."""
+        player = bot.get_player(ctx.guild)
+        player.loop = not getattr(player, 'loop', False)
+        await ctx.send(f"Loop {'enabled' if player.loop else 'disabled'} for current track.")
+    bot.add_command(commands.Command(loop_cmd, name="loop"))
 
     async def playlist_cmd(ctx: commands.Context, *args):
         """Dispatch playlist subcommands:
