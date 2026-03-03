@@ -632,8 +632,8 @@ class PlaylistActionsView(ui.View):
         if (not player.voice_client or not player.voice_client.is_connected()) and interaction.user.voice and interaction.user.voice.channel:
             try:
                 player.voice_client = await interaction.user.voice.channel.connect()
-            except Exception:
-                pass
+            except Exception as e:
+                logging.getLogger(__name__).exception("Failed to connect to voice channel: %s", e)
         count = 0
         for it in meta.get('items', []):
             tr = Track(title=it.get('title') or 'Unknown', source_url=it.get('source_url'), webpage_url=it.get('webpage_url'), duration=it.get('duration'), is_live=bool(it.get('is_live', False)))
@@ -920,8 +920,8 @@ class PlaylistActionSelectView(ui.View):
                     if (not player.voice_client or not player.voice_client.is_connected()) and interaction.user.voice and interaction.user.voice.channel:
                         try:
                             player.voice_client = await interaction.user.voice.channel.connect()
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logging.getLogger(__name__).exception("Failed to connect to voice channel: %s", e)
                     count = 0
                     for it in meta.get('items', []):
                         tr = Track(title=it.get('title') or 'Unknown', source_url=it.get('source_url'), webpage_url=it.get('webpage_url'), duration=it.get('duration'), is_live=bool(it.get('is_live', False)))

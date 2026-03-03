@@ -78,7 +78,10 @@ def create_bot() -> ControllerBot:
         player = bot.get_player(ctx.guild)
 
         if not player.voice_client or not player.voice_client.is_connected():
-            player.voice_client = await channel.connect()
+                try:
+                    player.voice_client = await channel.connect()
+                except Exception:
+                    logging.getLogger(__name__).exception("Failed to connect to voice channel for command: %s", ctx.command)
 
         # If forced-download mode is active (or deno missing), avoid extracting a stream URL here
         force_download = os.environ.get("DMBOT_FORCE_DOWNLOAD") == "1" or not shutil.which("deno")
