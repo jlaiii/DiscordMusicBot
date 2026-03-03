@@ -124,14 +124,37 @@ class MainMenuView(ui.View):
 
     @ui.button(label="Playlists", style=discord.ButtonStyle.primary, custom_id="dmbot:playlists")
     async def playlists_btn(self, interaction: discord.Interaction, button: ui.Button):
-        # open playlist browser view (ephemeral)
+        # open playlist browser view and publish it to the channel (visible to everyone)
         view = PlaylistBrowserView(self.bot, owner_id=str(interaction.user.id))
-        await view._load()
+        await view._load(interaction.guild)
         embed = view._build_embed()
         # attach the dynamic select to let user choose a playlist
         view.build_select()
         view._originating_interaction = interaction
-        await interaction.response.send_message(embed=embed, ephemeral=True, view=view)
+        try:
+            # send a non-ephemeral response so others can see the menu
+            await interaction.response.send_message(embed=embed, ephemeral=False, view=view)
+            try:
+                # store the published message on the view for future edits
+                msg = await interaction.original_response()
+                view.published_message = msg
+            except Exception:
+                pass
+        except Exception:
+            # fallback: try channel send
+            ch = getattr(interaction, 'channel', None)
+            if ch:
+                try:
+                    msg = await ch.send(embed=embed, view=view)
+                    view.published_message = msg
+                    try:
+                        await interaction.response.send_message("Published playlist menu to channel.", ephemeral=True)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    await interaction.response.send_message(f"Failed to publish playlist browser: {e}", ephemeral=True)
+            else:
+                await interaction.response.send_message("Could not publish playlist browser to channel.", ephemeral=True)
 
     @ui.button(label="Search/Play", style=discord.ButtonStyle.primary, custom_id="dmbot:search_play")
     async def search_play(self, interaction: discord.Interaction, button: ui.Button):
@@ -143,6 +166,8 @@ class PlaylistBrowserView(ui.View):
         super().__init__(timeout=timeout)
         self.bot = bot
         self.owner_id = owner_id
+        # store published message when this browser is shown in-channel
+        self.published_message: Optional[discord.Message] = None
         self.page = page
         self.per_page = 10
         self.playlists_cache = []
@@ -192,8 +217,58 @@ class PlaylistBrowserView(ui.View):
         for p in self.playlists_cache:
             p['owner_name'] = owner_names.get(p.get('owner_id'), p.get('owner_id'))
 
+    def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Only allow the owner to interact with this published view
+        try:
+            if str(interaction.user.id) != str(self.owner_id):
+                try:
+                    asyncio.create_task(safe_interaction_send(interaction, "Only the menu owner may interact with this view.", ephemeral=True))
+                except Exception:
+                    pass
+                return False
+        except Exception:
+            return False
+        return True
+
+    async def refresh_and_update(self, guild: Optional[discord.Guild] = None, interaction: Optional[discord.Interaction] = None) -> bool:
+        # reload cache and update published message; return True if we successfully edited a published message
+        await self._load(guild)
+        emb = self._build_embed()
+        self.build_select()
+        # if an interaction was provided, prefer to use its message as the published_message
+        try:
+            if interaction is not None and getattr(interaction, 'message', None):
+                self.published_message = interaction.message
+        except Exception:
+            pass
+        if not self.published_message:
+            return False
+        try:
+            await self.published_message.edit(embed=emb, view=self)
+            return True
+        except Exception:
+            return False
+
     def _build_embed(self):
-        embed = discord.Embed(title="Playlists", description=f"Page {self.page+1}")
+        # try to include owner display name in title when possible
+        owner_display = None
+        try:
+            for p in self.playlists_cache:
+                if str(p.get('owner_id')) == str(self.owner_id):
+                    owner_display = p.get('owner_name') or p.get('owner_id')
+                    break
+            if not owner_display and self.owner_id and self.owner_id != "0":
+                try:
+                    uid = int(self.owner_id)
+                    usr = self.bot.get_user(uid)
+                    if usr:
+                        owner_display = getattr(usr, 'display_name', None) or getattr(usr, 'name', None)
+                except Exception:
+                    owner_display = None
+        except Exception:
+            owner_display = None
+        title = f"{owner_display}'s Playlists" if owner_display else "Playlists"
+        embed = discord.Embed(title=title, description=f"Page {self.page+1}")
         start = self.page * self.per_page
         end = start + self.per_page
         items = self.playlists_cache[start:end]
@@ -291,6 +366,8 @@ class PlaylistBrowserView(ui.View):
                     action_view = PlaylistActionSelectView(view.bot, picked)
                     # track originating interaction so the action view can clear itself
                     action_view._originating_interaction = interaction
+                    # allow the action view to reference the parent browser for updates
+                    setattr(action_view, 'parent_browser', view)
                     await interaction.followup.send(embed=emb, ephemeral=True, view=action_view)
                 except Exception as e:
                     try:
@@ -308,7 +385,17 @@ class PlaylistBrowserView(ui.View):
             self.page -= 1
         embed = self._build_embed()
         self.build_select()
-        await interaction.response.edit_message(content=None, embed=embed, view=self)
+        # prefer editing the published message when available; record message from interaction if present
+        try:
+            if getattr(interaction, 'message', None):
+                self.published_message = interaction.message
+        except Exception:
+            pass
+        if not await self.refresh_and_update(interaction.guild, interaction=interaction):
+            try:
+                await interaction.response.edit_message(content=None, embed=embed, view=self)
+            except Exception:
+                pass
 
     @ui.button(label="Next", style=discord.ButtonStyle.secondary, custom_id="dmbot:pl_next")
     async def next(self, interaction: discord.Interaction, button: ui.Button):
@@ -318,16 +405,72 @@ class PlaylistBrowserView(ui.View):
             self.page += 1
         embed = self._build_embed()
         self.build_select()
-        await interaction.response.edit_message(content=None, embed=embed, view=self)
+        try:
+            if getattr(interaction, 'message', None):
+                self.published_message = interaction.message
+        except Exception:
+            pass
+        if not await self.refresh_and_update(interaction.guild, interaction=interaction):
+            try:
+                await interaction.response.edit_message(content=None, embed=embed, view=self)
+            except Exception:
+                pass
 
     @ui.button(label="Back", style=discord.ButtonStyle.primary, custom_id="dmbot:pl_back")
     async def back(self, interaction: discord.Interaction, button: ui.Button):
-        await interaction.response.edit_message(content="Closed playlists.", embed=None, view=None)
+        # remove published message if present, otherwise edit
+        try:
+            if getattr(interaction, 'message', None):
+                self.published_message = interaction.message
+        except Exception:
+            pass
+        if self.published_message:
+            try:
+                await self.published_message.delete()
+            except Exception:
+                pass
+            try:
+                await interaction.response.send_message("Closed playlists.", ephemeral=True)
+            except Exception:
+                pass
+        else:
+            try:
+                await interaction.response.edit_message(content="Closed playlists.", embed=None, view=None)
+            except Exception:
+                pass
+
+    @ui.button(label="Main Menu", style=discord.ButtonStyle.primary, custom_id="dmbot:pl_mainmenu")
+    async def main_menu(self, interaction: discord.Interaction, button: ui.Button):
+        # Only owner may open main menu from this browser
+        if str(interaction.user.id) != str(self.owner_id):
+            await interaction.response.send_message("Only the browser owner can open the main menu.", ephemeral=True)
+            return
+        try:
+            # replace the published message with the MainMenuView
+            main_view = MainMenuView(self.bot, timeout=None)
+            emb = discord.Embed(title="Music Controls", description="Open the player controls below.")
+            # if we have a published message, edit it to main menu; otherwise send ephemeral
+            if getattr(interaction, 'message', None):
+                try:
+                    await interaction.message.edit(embed=emb, view=main_view)
+                    # respond ephemeral to confirm
+                    await interaction.response.send_message("Opened main menu.", ephemeral=True)
+                    return
+                except Exception:
+                    pass
+            await interaction.response.send_message(embed=emb, view=main_view)
+        except Exception as e:
+            await interaction.response.send_message(f"Failed to open main menu: {e}", ephemeral=True)
 
     @ui.button(label="Create", style=discord.ButtonStyle.success, custom_id="dmbot:pl_create")
     async def create(self, interaction: discord.Interaction, button: ui.Button):
         try:
-            await interaction.response.send_modal(CreatePlaylistModal())
+            try:
+                if getattr(interaction, 'message', None):
+                    self.published_message = interaction.message
+            except Exception:
+                pass
+            await interaction.response.send_modal(CreatePlaylistModal(parent_browser=self))
         except Exception as e:
             await interaction.response.send_message(f"Failed to open create modal: {e}", ephemeral=True)
 
@@ -396,21 +539,22 @@ class PlaylistBrowserView(ui.View):
                             changed += 1
                     except Exception:
                         continue
-                # reload and update view
-                await self._load(interaction.guild)
-                emb = self._build_embed()
-                self.build_select()
+                # refresh and update the published view when possible
                 try:
-                    await interaction.followup.send(f"Updated {changed} playlists to '{new_vis}'.", ephemeral=True)
+                    await self.refresh_and_update(interaction.guild)
                 except Exception:
-                    pass
-                try:
-                    await interaction.edit_original_response(embed=emb, view=self)
-                except Exception:
+                    # fallback: rebuild embed and attempt to edit interaction message
+                    await self._load(interaction.guild)
+                    emb = self._build_embed()
+                    self.build_select()
                     try:
                         await interaction.response.edit_message(embed=emb, view=self)
                     except Exception:
                         pass
+                try:
+                    await interaction.followup.send(f"Updated {changed} playlists to '{new_vis}'.", ephemeral=True)
+                except Exception:
+                    pass
             except Exception as e:
                 try:
                     await interaction.followup.send(f"Failed to toggle visibility: {e}", ephemeral=True)
@@ -528,7 +672,8 @@ class PlaylistActionsView(ui.View):
             await interaction.response.send_message("Only the owner can remove items.", ephemeral=True)
             return
         try:
-            await interaction.response.send_modal(RemoveItemModal(self.playlist.get('name')))
+            parent = getattr(self, 'parent_browser', None)
+            await interaction.response.send_modal(RemoveItemModal(self.playlist.get('name'), parent_browser=parent))
         except Exception as e:
             await interaction.response.send_message(f"Failed to open remove modal: {e}", ephemeral=True)
 
@@ -559,6 +704,30 @@ class PlaylistActionsView(ui.View):
         # Intentionally no-op: keep this actions view open until the user closes it.
         return
 
+    @ui.button(label="Back to Browser", style=discord.ButtonStyle.secondary, custom_id="dmbot:pl_action_back_to_browser")
+    async def back_to_browser(self, interaction: discord.Interaction, button: ui.Button):
+        parent = getattr(self, 'parent_browser', None)
+        if not parent:
+            await interaction.response.send_message("No parent browser available.", ephemeral=True)
+            return
+        try:
+            # if the parent has a published message, refresh it and notify
+            try:
+                if getattr(interaction, 'message', None):
+                    parent.published_message = interaction.message
+            except Exception:
+                pass
+            updated = await parent.refresh_and_update(interaction.guild, interaction=interaction)
+            if updated:
+                await interaction.response.send_message("Returned to playlist browser.", ephemeral=True)
+            else:
+                # fallback: send ephemeral copy of browser to the user
+                emb = parent._build_embed()
+                parent.build_select()
+                await interaction.response.send_message("Opening your playlist browser:", ephemeral=True, embed=emb, view=parent)
+        except Exception as e:
+            await interaction.response.send_message(f"Failed to return to browser: {e}", ephemeral=True)
+
     @ui.button(label="Edit", style=discord.ButtonStyle.secondary, custom_id="dmbot:pl_action_edit")
     async def edit(self, interaction: discord.Interaction, button: ui.Button):
         # only owner may edit
@@ -566,7 +735,8 @@ class PlaylistActionsView(ui.View):
             await interaction.response.send_message("Only the owner can edit this playlist.", ephemeral=True)
             return
         try:
-            await interaction.response.send_modal(EditPlaylistModal(self.playlist.get('name')))
+            parent = getattr(self, 'parent_browser', None)
+            await interaction.response.send_modal(EditPlaylistModal(self.playlist.get('name'), parent_browser=parent))
         except Exception as e:
             await interaction.response.send_message(f"Failed to open edit modal: {e}", ephemeral=True)
 
@@ -576,7 +746,8 @@ class PlaylistActionsView(ui.View):
             await interaction.response.send_message("Only the owner can delete this playlist.", ephemeral=True)
             return
         # simple confirmation
-        confirm = ConfirmDeleteView(self.playlist.get('name'))
+        parent = getattr(self, 'parent_browser', None)
+        confirm = ConfirmDeleteView(self.playlist.get('name'), parent_browser=parent)
         await interaction.response.send_message(f"Confirm delete playlist '{self.playlist.get('name')}'?", ephemeral=True, view=confirm)
 
     @ui.button(label="Share/Unshare", style=discord.ButtonStyle.primary, custom_id="dmbot:pl_action_share")
@@ -608,23 +779,22 @@ class PublicShareView(ui.View):
     @ui.button(label="Import", style=discord.ButtonStyle.success, custom_id="dmbot:public_import")
     async def import_btn(self, interaction: discord.Interaction, button: ui.Button):
         try:
+            # Let the user choose an import target (existing playlist or create new)
             meta = self.meta
-            owner = str(interaction.user.id)
-            newname = f"Imported {meta.get('name')}"
+            chooser = ImportTargetView(meta)
+            # try to load the user's playlists so they can pick
             try:
-                await playlists.create_playlist(owner, newname)
+                await chooser._load(owner_id=str(interaction.user.id))
             except Exception:
                 pass
-            count = 0
-            for it in meta.get('items', []):
-                try:
-                    await playlists.add_item(owner, newname, it.get('title') or 'Unknown', it.get('webpage_url'), it.get('source_url'), it.get('duration'), bool(it.get('is_live', False)))
-                    count += 1
-                except Exception:
-                    continue
-            await interaction.response.send_message(f"Imported {count} items into playlist '{newname}'.", ephemeral=True)
+            chooser.build_select()
+            # send ephemeral chooser so user selects where to import
+            await interaction.response.send_message("Choose where to import the playlist:", ephemeral=True, view=chooser)
         except Exception as e:
-            await interaction.response.send_message(f"Import failed: {e}", ephemeral=True)
+            try:
+                await interaction.response.send_message(f"Import failed: {e}", ephemeral=True)
+            except Exception:
+                pass
 
     @ui.button(label="Close", style=discord.ButtonStyle.secondary, custom_id="dmbot:public_close")
     async def close_btn(self, interaction: discord.Interaction, button: ui.Button):
@@ -671,20 +841,17 @@ class PublicShareAllView(ui.View):
         if not meta:
             await interaction.response.send_message("Playlist not found.", ephemeral=True)
             return
-        owner = str(interaction.user.id)
-        newname = f"Imported {meta.get('name')}"
+        # open import target chooser to let the user pick an existing playlist or create a new one
         try:
-            await playlists.create_playlist(owner, newname)
-        except Exception:
-            pass
-        count = 0
-        for it in meta.get('items', []):
+            chooser = ImportTargetView(meta)
             try:
-                await playlists.add_item(owner, newname, it.get('title') or 'Unknown', it.get('webpage_url'), it.get('source_url'), it.get('duration'), bool(it.get('is_live', False)))
-                count += 1
+                await chooser._load(owner_id=str(interaction.user.id))
             except Exception:
-                continue
-        await interaction.response.send_message(f"Imported {count} items into playlist '{newname}'.", ephemeral=True)
+                pass
+            chooser.build_select()
+            await interaction.response.send_message("Choose where to import the playlist:", ephemeral=True, view=chooser)
+        except Exception as e:
+            await interaction.response.send_message(f"Import failed: {e}", ephemeral=True)
 
 
 class PlaylistActionSelectView(ui.View):
@@ -831,7 +998,8 @@ class PlaylistActionSelectView(ui.View):
                         await interaction.response.send_message("Only the owner can edit.", ephemeral=True)
                         return
                     try:
-                        await interaction.response.send_modal(EditPlaylistModal(p.get('name')))
+                        parent = getattr(view, 'parent_browser', None)
+                        await interaction.response.send_modal(EditPlaylistModal(p.get('name'), parent_browser=parent))
                     except Exception as e:
                         await interaction.response.send_message(f"Failed to open edit modal: {e}", ephemeral=True)
                 elif act == "remove":
@@ -839,14 +1007,16 @@ class PlaylistActionSelectView(ui.View):
                         await interaction.response.send_message("Only the owner can remove items.", ephemeral=True)
                         return
                     try:
-                        await interaction.response.send_modal(RemoveItemModal(p.get('name')))
+                        parent = getattr(view, 'parent_browser', None)
+                        await interaction.response.send_modal(RemoveItemModal(p.get('name'), parent_browser=parent))
                     except Exception as e:
                         await interaction.response.send_message(f"Failed to open remove modal: {e}", ephemeral=True)
                 elif act == "delete":
                     if str(interaction.user.id) != str(p.get('owner_id')):
                         await interaction.response.send_message("Only the owner can delete.", ephemeral=True)
                         return
-                    confirm = ConfirmDeleteView(p.get('name'))
+                    parent = getattr(view, 'parent_browser', None)
+                    confirm = ConfirmDeleteView(p.get('name'), parent_browser=parent)
                     await interaction.response.send_message(f"Confirm delete playlist '{p.get('name')}'?", ephemeral=True, view=confirm)
                 elif act == "publish":
                     if str(interaction.user.id) != str(p.get('owner_id')):
@@ -892,10 +1062,98 @@ class PlaylistActionSelectView(ui.View):
         return
 
 
+class ImportTargetView(ui.View):
+    """Ephemeral view shown to a user choosing where to import a shared playlist.
+    Options: pick an existing playlist (owned by the user) or create a new 'Imported <name>'.
+    """
+    def __init__(self, meta: dict, timeout: Optional[float] = None):
+        super().__init__(timeout=timeout)
+        self.meta = meta
+        self.select: Optional[ui.Select] = None
+        self.playlists_cache: list[dict] = []
+
+    async def _load(self, owner_id: str, guild: Optional[discord.Guild] = None):
+        try:
+            self.playlists_cache = await playlists.list_playlists_for_user(str(owner_id))
+        except Exception:
+            self.playlists_cache = []
+
+    def build_select(self):
+        # remove existing
+        if self.select:
+            try:
+                self.remove_item(self.select)
+            except Exception:
+                pass
+        options = []
+        for p in self.playlists_cache[:25]:
+            label = p.get('name') or 'Untitled'
+            desc = f"Use existing: {label} ({p.get('visibility')})"
+            options.append(discord.SelectOption(label=label, description=desc, value=str(p.get('name'))))
+        # add create-new option
+        options.append(discord.SelectOption(label=f"Create new 'Imported {self.meta.get('name')}'", description="Create a new playlist and import into it", value="__create_new__"))
+
+        if not options:
+            return
+
+        class _ImpSel(ui.Select):
+            def __init__(self, opts):
+                super().__init__(placeholder="Select target playlist…", min_values=1, max_values=1, options=opts)
+
+            async def callback(self, interaction: discord.Interaction):
+                view = getattr(self, 'view', None)
+                if view is None:
+                    await interaction.response.send_message("Internal error: view not available.", ephemeral=True)
+                    return
+                choice = self.values[0]
+                owner = str(interaction.user.id)
+                try:
+                    if choice == '__create_new__':
+                        newname = f"Imported {view.meta.get('name')}"
+                        try:
+                            await playlists.create_playlist(owner, newname)
+                        except Exception:
+                            pass
+                        count = 0
+                        for it in view.meta.get('items', []):
+                            try:
+                                await playlists.add_item(owner, newname, it.get('title') or 'Unknown', it.get('webpage_url'), it.get('source_url'), it.get('duration'), bool(it.get('is_live', False)))
+                                count += 1
+                            except Exception:
+                                continue
+                        await interaction.response.send_message(f"Imported {count} items into playlist '{newname}'.", ephemeral=True)
+                        return
+
+                    # otherwise add into the selected existing playlist
+                    target_name = choice
+                    # ensure playlist exists for this user
+                    exists = any(str(p.get('name')) == str(target_name) for p in view.playlists_cache)
+                    if not exists:
+                        # create it if missing
+                        try:
+                            await playlists.create_playlist(owner, target_name)
+                        except Exception:
+                            pass
+                    count = 0
+                    for it in view.meta.get('items', []):
+                        try:
+                            await playlists.add_item(owner, target_name, it.get('title') or 'Unknown', it.get('webpage_url'), it.get('source_url'), it.get('duration'), bool(it.get('is_live', False)))
+                            count += 1
+                        except Exception:
+                            continue
+                    await interaction.response.send_message(f"Imported {count} items into playlist '{target_name}'.", ephemeral=True)
+                except Exception as e:
+                    await interaction.response.send_message(f"Import failed: {e}", ephemeral=True)
+
+        self.select = _ImpSel(options)
+        self.add_item(self.select)
+
+
 class EditPlaylistModal(ui.Modal, title="Edit Playlist"):
-    def __init__(self, current_name: str):
+    def __init__(self, current_name: str, parent_browser: Optional[PlaylistBrowserView] = None):
         super().__init__()
         self.current_name = current_name
+        self.parent_browser = parent_browser
         self.name_input = ui.TextInput(label="New name (leave same to keep)", default=current_name, required=False)
         self.add_item(self.name_input)
 
@@ -908,14 +1166,21 @@ class EditPlaylistModal(ui.Modal, title="Edit Playlist"):
             await interaction.response.send_message(f"Edit failed: {e}", ephemeral=True)
             return
         if ok:
+            # try to refresh parent browser if present
+            try:
+                if self.parent_browser and str(interaction.user.id) == str(self.parent_browser.owner_id):
+                    await self.parent_browser.refresh_and_update(interaction.guild)
+            except Exception:
+                pass
             await interaction.response.send_message(f"Updated playlist '{self.current_name}'.", ephemeral=True)
         else:
             await interaction.response.send_message("Edit failed. Are you the owner?", ephemeral=True)
 
 
 class CreatePlaylistModal(ui.Modal, title="Create Playlist"):
-    def __init__(self):
+    def __init__(self, parent_browser: Optional[PlaylistBrowserView] = None):
         super().__init__()
+        self.parent_browser = parent_browser
         self.name = ui.TextInput(label="Playlist name", placeholder="My playlist", required=True)
         self.vis = ui.TextInput(label="Visibility (public|private)", default="private", required=False)
         self.add_item(self.name)
@@ -930,15 +1195,22 @@ class CreatePlaylistModal(ui.Modal, title="Create Playlist"):
         owner = str(interaction.user.id)
         try:
             await playlists.create_playlist(owner, pname, visibility=vis)
+            # refresh parent browser if present and owner matches
+            try:
+                if self.parent_browser and str(interaction.user.id) == str(self.parent_browser.owner_id):
+                    await self.parent_browser.refresh_and_update(interaction.guild)
+            except Exception:
+                pass
             await interaction.response.send_message(f"Created playlist '{pname}'.", ephemeral=True)
         except Exception as e:
             await interaction.response.send_message(f"Failed to create playlist: {e}", ephemeral=True)
 
 
 class RemoveItemModal(ui.Modal, title="Remove Item from Playlist"):
-    def __init__(self, playlist_name: str):
+    def __init__(self, playlist_name: str, parent_browser: Optional[PlaylistBrowserView] = None):
         super().__init__()
         self.playlist_name = playlist_name
+        self.parent_browser = parent_browser
         self.index = ui.TextInput(label="Item index to remove", placeholder="1", required=True)
         self.add_item(self.index)
 
@@ -955,20 +1227,31 @@ class RemoveItemModal(ui.Modal, title="Remove Item from Playlist"):
             await interaction.response.send_message(f"Remove failed: {e}", ephemeral=True)
             return
         if ok:
+            try:
+                if self.parent_browser and str(interaction.user.id) == str(self.parent_browser.owner_id):
+                    await self.parent_browser.refresh_and_update(interaction.guild)
+            except Exception:
+                pass
             await interaction.response.send_message(f"Removed item {idx} from '{self.playlist_name}'.", ephemeral=True)
         else:
             await interaction.response.send_message("Remove failed. Is the index correct and are you the owner?", ephemeral=True)
 
 
 class ConfirmDeleteView(ui.View):
-    def __init__(self, playlist_name: str, timeout: Optional[float] = None):
+    def __init__(self, playlist_name: str, parent_browser: Optional[PlaylistBrowserView] = None, timeout: Optional[float] = None):
         super().__init__(timeout=timeout)
         self.playlist_name = playlist_name
+        self.parent_browser = parent_browser
 
     @ui.button(label="Confirm Delete", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: ui.Button):
         ok = await playlists.delete_playlist(str(interaction.user.id), self.playlist_name)
         if ok:
+            try:
+                if self.parent_browser and str(interaction.user.id) == str(self.parent_browser.owner_id):
+                    await self.parent_browser.refresh_and_update(interaction.guild)
+            except Exception:
+                pass
             await interaction.response.send_message(f"Deleted playlist '{self.playlist_name}'.", ephemeral=True)
         else:
             await interaction.response.send_message("Delete failed. Are you the owner?", ephemeral=True)

@@ -280,7 +280,11 @@ def create_bot() -> ControllerBot:
                 await view._load(ctx.guild)
                 embed = view._build_embed()
                 view.build_select()
-                await ctx.send(embed=embed, view=view)
+                msg = await ctx.send(embed=embed, view=view)
+                try:
+                    view.published_message = msg
+                except Exception:
+                    pass
                 return
             except Exception as e:
                 await ctx.send(f"Failed to open playlist browser: {e}")
