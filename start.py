@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 import time
+import socket
 
 
 def venv_python():
@@ -126,8 +127,15 @@ def ensure_system_deps():
 
 def pip_install(vpy):
     print("Installing requirements via:", vpy)
-    subprocess.check_call([vpy, "-m", "pip", "install", "--upgrade", "pip"])
-    subprocess.check_call([vpy, "-m", "pip", "install", "-r", "requirements.txt"])
+    try:
+        subprocess.check_call([vpy, "-m", "pip", "install", "--upgrade", "pip"])
+    except Exception as e:
+        print("Warning: failed to upgrade pip:", e)
+    try:
+        subprocess.check_call([vpy, "-m", "pip", "install", "-r", "requirements.txt"])
+    except Exception as e:
+        print("Warning: pip install requirements failed:", e)
+        print("You may need to install dependencies manually inside the virtualenv.")
 
 
 def read_or_create_token(token_path: str):
@@ -159,7 +167,12 @@ def run_bot(vpy, token):
 
     print("Execing bot with:", " ".join(cmd))
     # Replace this process with the bot process so the container runtime (Pterodactyl) sees it
-    os.execv(cmd[0], cmd)
+    # Use execvpe so the provided environment is used for the new process.
+    try:
+        os.execvpe(cmd[0], cmd, env)
+    except AttributeError:
+        # Older Python builds may not have execvpe; fall back to execv
+        os.execv(cmd[0], cmd)
 
 
 def main():
@@ -174,8 +187,52 @@ def main():
     print("Enabling forced download mode (DMBOT_FORCE_DOWNLOAD=1) to ensure reliable playback in restricted containers")
     os.environ["DMBOT_FORCE_DOWNLOAD"] = "1"
 
+    # Quick UDP egress self-test to detect blocked UDP which prevents voice
+    def _udp_self_test(host: str = "c-dfw09-35615782.discord.media", port: int = 2087, timeout: float = 2.0) -> bool:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(timeout)
+        try:
+            try:
+                s.sendto(b"udp-test", (host, port))
+                print(f"UDP test: sendto({host}:{port}) succeeded (no guarantee replies) — UDP egress likely allowed")
+                return True
+            except Exception as e:
+                print(f"UDP test: sendto failed: {e}")
+                return False
+        finally:
+            try:
+                s.close()
+            except Exception:
+                pass
+
+    try:
+        ok = _udp_self_test()
+        if not ok:
+            print("WARNING: UDP egress test failed. Voice may not work in this container. Consider moving to a host that allows UDP or enabling UDP in the node.")
+        else:
+            print("UDP self-test passed (outbound UDP appears permitted).")
+    except Exception as e:
+        print("UDP self-test raised an unexpected error:", e)
+
+    # Print runtime library versions to help debugging voice issues
+    try:
+        import discord
+        import nacl
+        print("discord.py version:", getattr(discord, '__version__', 'unknown'))
+        print("PyNaCl version:", getattr(nacl, '__version__', 'unknown'))
+    except Exception as e:
+        print("Warning: failed to import discord or nacl:", e)
+
+    # ffmpeg presence
+    try:
+        print("ffmpeg on PATH:", bool(shutil.which('ffmpeg')))
+    except Exception:
+        pass
+
     proc = run_bot(vpy, token)
-    print("Bot started (PID: {}), you can inspect logs or terminate it.")
+
+    # If execvpe succeeded this code will not run. If it does, report.
+    print("If you see this, the bot process was not exec'ed successfully.")
 
 
 if __name__ == "__main__":

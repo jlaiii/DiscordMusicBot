@@ -15,9 +15,84 @@ from discord.ext import commands
 from player import MusicPlayer, Track, yt_dlp_get_url, yt_dlp_get_candidates
 from worker import run_worker
 import playlists
+import socket
+import platform
+import sys
+import traceback
 
-logging.basicConfig(level=logging.INFO)
+
+def _log_network_diagnostics(prefix: str = "diag"):
+    lg = logging.getLogger(__name__)
+    try:
+        lg.debug("%s: platform=%s python=%s pid=%s", prefix, platform.platform(), sys.version.replace('\n', ' '), os.getpid())
+    except Exception:
+        pass
+    try:
+        hn = socket.gethostname()
+        lg.debug("%s: hostname=%s", prefix, hn)
+        try:
+            addrs = socket.gethostbyname_ex(hn)
+            lg.debug("%s: hostaddrs=%s", prefix, addrs)
+        except Exception as e:
+            lg.debug("%s: gethostbyname_ex failed: %s", prefix, e)
+    except Exception:
+        pass
+    # outbound IP detection
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # use a public IP to determine default outbound IP (no packets sent)
+            s.connect(("8.8.8.8", 80))
+            lg.debug("%s: outbound_ip=%s", prefix, s.getsockname())
+        finally:
+            s.close()
+    except Exception as e:
+        lg.debug("%s: outbound detection failed: %s", prefix, e)
+
+
+def _udp_probe(host: str, port: int, timeout: float = 2.0):
+    lg = logging.getLogger(__name__)
+    lg.debug("udp_probe: resolving host %s", host)
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+        lg.debug("udp_probe: resolved addrs=%s", infos)
+    except Exception as e:
+        lg.exception("udp_probe: DNS resolution failed for %s:%s -> %s", host, port, e)
+        return False
+    ok_any = False
+    for afi, socktype, proto, canonname, sa in infos:
+        try:
+            s = socket.socket(afi, socket.SOCK_DGRAM)
+            s.settimeout(timeout)
+            try:
+                s.bind(("0.0.0.0", 0))
+            except Exception:
+                pass
+            try:
+                s.sendto(b"diag-udp-test", sa)
+                lg.debug("udp_probe: sendto succeeded to %s", sa)
+                ok_any = True
+                try:
+                    data, addr = s.recvfrom(1024)
+                    lg.debug("udp_probe: recvfrom returned %s from %s", data, addr)
+                except socket.timeout:
+                    lg.debug("udp_probe: no reply (timeout) from %s", sa)
+            except Exception as e:
+                lg.debug("udp_probe: sendto failed to %s: %s", sa, e)
+            finally:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            lg.debug("udp_probe: socket create failed for %s: %s", sa, e)
+    return ok_any
+
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("dmbot")
+# Enable debug for discord internals to capture voice handshake details
+logging.getLogger("discord").setLevel(logging.DEBUG)
+logging.getLogger("discord.voice_state").setLevel(logging.DEBUG)
 # reduce noisy ffmpeg termination INFO logs from discord internals
 logging.getLogger("discord.player").setLevel(logging.WARNING)
 
@@ -70,6 +145,108 @@ class ControllerBot(commands.Bot):
 def create_bot() -> ControllerBot:
     bot = ControllerBot()
 
+    def _log_network_diagnostics(prefix: str = "diag"):
+        lg = logging.getLogger(__name__)
+        try:
+            lg.debug("%s: platform=%s python=%s pid=%s", prefix, platform.platform(), sys.version.replace('\n', ' '), os.getpid())
+        except Exception:
+            pass
+        try:
+            hn = socket.gethostname()
+            lg.debug("%s: hostname=%s", prefix, hn)
+            try:
+                addrs = socket.gethostbyname_ex(hn)
+                lg.debug("%s: hostaddrs=%s", prefix, addrs)
+            except Exception as e:
+                lg.debug("%s: gethostbyname_ex failed: %s", prefix, e)
+        except Exception:
+            pass
+        # outbound IP detection
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                # use a public IP to determine default outbound IP (no packets sent)
+                s.connect(("8.8.8.8", 80))
+                lg.debug("%s: outbound_ip=%s", prefix, s.getsockname())
+            finally:
+                s.close()
+        except Exception as e:
+            lg.debug("%s: outbound detection failed: %s", prefix, e)
+
+    def _udp_probe(host: str, port: int, timeout: float = 2.0):
+        lg = logging.getLogger(__name__)
+        lg.debug("udp_probe: resolving host %s", host)
+        try:
+            infos = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+            lg.debug("udp_probe: resolved addrs=%s", infos)
+        except Exception as e:
+            lg.exception("udp_probe: DNS resolution failed for %s:%s -> %s", host, port, e)
+            return False
+        ok_any = False
+        for afi, socktype, proto, canonname, sa in infos:
+            try:
+                s = socket.socket(afi, socket.SOCK_DGRAM)
+                s.settimeout(timeout)
+                try:
+                    s.bind(("0.0.0.0", 0))
+                except Exception:
+                    pass
+                try:
+                    s.sendto(b"diag-udp-test", sa)
+                    lg.debug("udp_probe: sendto succeeded to %s", sa)
+                    ok_any = True
+                    try:
+                        data, addr = s.recvfrom(1024)
+                        lg.debug("udp_probe: recvfrom returned %s from %s", data, addr)
+                    except socket.timeout:
+                        lg.debug("udp_probe: no reply (timeout) from %s", sa)
+                except Exception as e:
+                    lg.debug("udp_probe: sendto failed to %s: %s", sa, e)
+                finally:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+            except Exception as e:
+                lg.debug("udp_probe: socket create failed for %s: %s", sa, e)
+        return ok_any
+
+    async def _voice_monitor(player: MusicPlayer, channel: discord.abc.Connectable):
+        """Background task: monitor voice_client state and try a few reconnects on unexpected disconnect."""
+        logger = logging.getLogger(__name__)
+        attempts = 0
+        max_attempts = 3
+        try:
+            while True:
+                await asyncio.sleep(2)
+                vc = getattr(player, 'voice_client', None)
+                try:
+                    connected = bool(vc and vc.is_connected())
+                except Exception:
+                    connected = False
+                logger.debug("Voice monitor: guild=%s connected=%s attempts=%d", getattr(player.guild, 'id', None), connected, attempts)
+                if not connected:
+                    # attempt reconnect a few times
+                    if attempts >= max_attempts:
+                        logger.warning("Voice monitor: exceeded reconnect attempts for guild %s", getattr(player.guild, 'id', None))
+                        return
+                    attempts += 1
+                    try:
+                        async with player._connect_lock:
+                            if not player.voice_client or not player.voice_client.is_connected():
+                                logger.info("Voice monitor: attempting reconnect #%d for guild %s to channel %s", attempts, getattr(player.guild, 'id', None), getattr(channel, 'id', None))
+                                try:
+                                    player.voice_client = await channel.connect()
+                                    logger.info("Voice monitor: reconnect succeeded for guild %s", getattr(player.guild, 'id', None))
+                                    attempts = 0
+                                except Exception:
+                                    logger.exception("Voice monitor: reconnect failed for guild %s", getattr(player.guild, 'id', None))
+                    except Exception:
+                        logger.exception("Voice monitor: connect-lock failed during reconnect for guild %s", getattr(player.guild, 'id', None))
+        except asyncio.CancelledError:
+            return
+
+
     async def play(ctx: commands.Context, *, query: str):
         if not ctx.author.voice or not ctx.author.voice.channel:
             await ctx.send("You must be connected to a voice channel to play audio.")
@@ -78,10 +255,36 @@ def create_bot() -> ControllerBot:
         player = bot.get_player(ctx.guild)
 
         if not player.voice_client or not player.voice_client.is_connected():
+            try:
+                lg = logging.getLogger(__name__)
+                lg.debug("Command %s: attempting connect to voice channel %s (guild=%s)", ctx.command, getattr(channel, 'id', None), getattr(ctx.guild, 'id', None))
+                # run diagnostics before attempting to connect
                 try:
-                    player.voice_client = await channel.connect()
+                    _log_network_diagnostics(prefix=f"cmd_connect_guild_{getattr(ctx.guild, 'id', None)}")
+                    # probe common discord media endpoint seen in logs; best-effort
+                    _udp_ok = _udp_probe("c-dfw09-35615782.discord.media", 2087)
+                    lg.debug("Command %s: udp_probe result=%s", ctx.command, _udp_ok)
                 except Exception:
-                    logging.getLogger(__name__).exception("Failed to connect to voice channel for command: %s", ctx.command)
+                    lg.exception("Pre-connect diagnostics failed")
+                async with player._connect_lock:
+                    if not player.voice_client or not player.voice_client.is_connected():
+                        try:
+                            player.voice_client = await channel.connect()
+                            logging.getLogger(__name__).debug("Command %s: connected to voice channel %s (guild=%s)", ctx.command, getattr(channel, 'id', None), getattr(ctx.guild, 'id', None))
+                            # start voice monitor task for this player
+                            try:
+                                if getattr(player, '_voice_monitor_task', None) and not player._voice_monitor_task.done():
+                                    player._voice_monitor_task.cancel()
+                            except Exception:
+                                pass
+                            try:
+                                player._voice_monitor_task = asyncio.get_event_loop().create_task(_voice_monitor(player, channel))
+                            except Exception:
+                                logging.getLogger(__name__).exception("Failed to create voice monitor task for guild: %s", getattr(player.guild, 'id', None))
+                        except Exception:
+                            logging.getLogger(__name__).exception("Failed to connect to voice channel for command: %s", ctx.command)
+            except Exception:
+                logging.getLogger(__name__).exception("Connect-lock failed for command: %s", ctx.command)
 
         # If forced-download mode is active (or deno missing), avoid extracting a stream URL here
         force_download = os.environ.get("DMBOT_FORCE_DOWNLOAD") == "1" or not shutil.which("deno")

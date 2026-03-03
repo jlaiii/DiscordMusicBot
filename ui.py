@@ -631,9 +631,32 @@ class PlaylistActionsView(ui.View):
         # ensure connected if user in voice and bot not connected
         if (not player.voice_client or not player.voice_client.is_connected()) and interaction.user.voice and interaction.user.voice.channel:
             try:
-                player.voice_client = await interaction.user.voice.channel.connect()
-            except Exception as e:
-                logging.getLogger(__name__).exception("Failed to connect to voice channel: %s", e)
+                lg = logging.getLogger(__name__)
+                lg.debug("UI import/get flow: attempting connect to voice channel %s (guild=%s) for user %s", getattr(interaction.user.voice.channel, 'id', None), getattr(interaction.guild, 'id', None), interaction.user.id)
+                # run diagnostics before attempting to connect
+                try:
+                    __import__('bot')._log_network_diagnostics(prefix=f"ui_import_guild_{getattr(interaction.guild, 'id', None)}")
+                    __import__('bot')._udp_probe("c-dfw09-35615782.discord.media", 2087)
+                except Exception:
+                    lg.exception("UI import/get pre-connect diagnostics failed")
+                async with player._connect_lock:
+                    if not player.voice_client or not player.voice_client.is_connected():
+                        try:
+                            player.voice_client = await interaction.user.voice.channel.connect()
+                            logging.getLogger(__name__).debug("UI import/get flow: connected to voice channel %s (guild=%s)", getattr(interaction.user.voice.channel, 'id', None), getattr(interaction.guild, 'id', None))
+                            try:
+                                if getattr(player, '_voice_monitor_task', None) and not player._voice_monitor_task.done():
+                                    player._voice_monitor_task.cancel()
+                            except Exception:
+                                pass
+                            try:
+                                player._voice_monitor_task = asyncio.get_event_loop().create_task(__import__('bot')._voice_monitor(player, interaction.user.voice.channel))
+                            except Exception:
+                                logging.getLogger(__name__).exception("Failed to create voice monitor task (UI import/get flow) for guild: %s", getattr(player.guild, 'id', None))
+                        except Exception as e:
+                            logging.getLogger(__name__).exception("Failed to connect to voice channel: %s", e)
+            except Exception:
+                logging.getLogger(__name__).exception("Connect-lock failed while attempting to join voice (import/get flow)")
         count = 0
         for it in meta.get('items', []):
             tr = Track(title=it.get('title') or 'Unknown', source_url=it.get('source_url'), webpage_url=it.get('webpage_url'), duration=it.get('duration'), is_live=bool(it.get('is_live', False)))
@@ -919,9 +942,25 @@ class PlaylistActionSelectView(ui.View):
                     player = bot.get_player(interaction.guild)
                     if (not player.voice_client or not player.voice_client.is_connected()) and interaction.user.voice and interaction.user.voice.channel:
                         try:
-                            player.voice_client = await interaction.user.voice.channel.connect()
-                        except Exception as e:
-                            logging.getLogger(__name__).exception("Failed to connect to voice channel: %s", e)
+                            logging.getLogger(__name__).debug("UI playlist play flow: attempting connect to voice channel %s (guild=%s) for user %s", getattr(interaction.user.voice.channel, 'id', None), getattr(interaction.guild, 'id', None), interaction.user.id)
+                            async with player._connect_lock:
+                                if not player.voice_client or not player.voice_client.is_connected():
+                                        try:
+                                            player.voice_client = await interaction.user.voice.channel.connect()
+                                            logging.getLogger(__name__).debug("UI playlist play flow: connected to voice channel %s (guild=%s)", getattr(interaction.user.voice.channel, 'id', None), getattr(interaction.guild, 'id', None))
+                                            try:
+                                                if getattr(player, '_voice_monitor_task', None) and not player._voice_monitor_task.done():
+                                                    player._voice_monitor_task.cancel()
+                                            except Exception:
+                                                pass
+                                            try:
+                                                player._voice_monitor_task = asyncio.get_event_loop().create_task(__import__('bot')._voice_monitor(player, interaction.user.voice.channel))
+                                            except Exception:
+                                                logging.getLogger(__name__).exception("Failed to create voice monitor task (UI playlist flow) for guild: %s", getattr(player.guild, 'id', None))
+                                        except Exception as e:
+                                            logging.getLogger(__name__).exception("Failed to connect to voice channel: %s", e)
+                        except Exception:
+                            logging.getLogger(__name__).exception("Connect-lock failed while attempting to join voice (playlist play flow)")
                     count = 0
                     for it in meta.get('items', []):
                         tr = Track(title=it.get('title') or 'Unknown', source_url=it.get('source_url'), webpage_url=it.get('webpage_url'), duration=it.get('duration'), is_live=bool(it.get('is_live', False)))
@@ -1278,9 +1317,27 @@ class SearchModal(ui.Modal, title="Search and Play"):
         channel = interaction.user.voice.channel
         if not player.voice_client or not player.voice_client.is_connected():
             try:
-                player.voice_client = await channel.connect()
-            except Exception as e:
-                await interaction.response.send_message(f"Failed to join voice channel: {e}", ephemeral=True)
+                logging.getLogger(__name__).debug("Search modal: attempting connect to voice channel %s (guild=%s) for user %s", getattr(channel, 'id', None), getattr(interaction.guild, 'id', None), interaction.user.id)
+                async with player._connect_lock:
+                    if not player.voice_client or not player.voice_client.is_connected():
+                        try:
+                            player.voice_client = await channel.connect()
+                            logging.getLogger(__name__).debug("Search modal: connected to voice channel %s (guild=%s)", getattr(channel, 'id', None), getattr(interaction.guild, 'id', None))
+                            try:
+                                if getattr(player, '_voice_monitor_task', None) and not player._voice_monitor_task.done():
+                                    player._voice_monitor_task.cancel()
+                            except Exception:
+                                pass
+                            try:
+                                player._voice_monitor_task = asyncio.get_event_loop().create_task(__import__('bot')._voice_monitor(player, channel))
+                            except Exception:
+                                logging.getLogger(__name__).exception("Failed to create voice monitor task (Search modal) for guild: %s", getattr(player.guild, 'id', None))
+                        except Exception as e:
+                            await interaction.response.send_message(f"Failed to join voice channel: {e}", ephemeral=True)
+                            return
+            except Exception:
+                logging.getLogger(__name__).exception("Connect-lock failed while attempting to join voice (search modal)")
+                await interaction.response.send_message("Failed to join voice channel (internal error)", ephemeral=True)
                 return
 
         # attempt to resolve via yt_dlp_get_url

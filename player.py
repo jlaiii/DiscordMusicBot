@@ -272,6 +272,10 @@ class MusicPlayer:
         self.task = None
         if start_task:
             self.task = bot.loop.create_task(self.player_loop())
+        # prevent concurrent connect attempts which can cause duplicate handshakes
+        self._connect_lock: asyncio.Lock = asyncio.Lock()
+        # background monitor task for voice connection state
+        self._voice_monitor_task: asyncio.Task | None = None
         # loop flag: when True, replay the currently finished track
         self.loop: bool = False
         # locate ffmpeg
@@ -814,6 +818,12 @@ class MusicPlayer:
     async def stop(self):
         if self.voice_client and self.voice_client.is_connected():
             await self.voice_client.disconnect()
+        # cancel monitor task if running
+        try:
+            if getattr(self, '_voice_monitor_task', None) and not self._voice_monitor_task.done():
+                self._voice_monitor_task.cancel()
+        except Exception:
+            pass
         # drain queue
         while not self.queue.empty():
             try:
